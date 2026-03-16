@@ -2,6 +2,9 @@ const { assistantIA } = require("./assistant");
 
 const fmt = n => new Intl.NumberFormat("fr-FR").format(n) + " FCFA";
 
+// Stockage temporaire des résultats OCR en attente de confirmation
+const ocrPending = {};
+
 module.exports = function setupTelegram(bot, supabase, genAI) {
 
   // /start
@@ -31,10 +34,11 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     try {
       const reponse = await assistantIA(
         "Donne-moi une vue generale complete de ETS DZM : facturation globale, paiements, reste a payer, produits moteurs top 3.",
-        [], supabase, genAI
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Vue Generale Proprietaire\n\n" + reponse);
     } catch (e) {
+      console.error("vue_generale error:", e.message);
       bot.sendMessage(chatId, "Erreur lors de l'analyse.");
     }
   });
@@ -45,8 +49,8 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "Analyse DZM A en cours...");
     try {
       const reponse = await assistantIA(
-        "Analyse detaillee de DZM A uniquement : factures, paiements, CA, clients principaux.",
-        [], supabase, genAI
+        "Analyse detaillee de DZM A : factures, paiements, CA, clients principaux.",
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Analyse DZM A\n\n" + reponse);
     } catch (e) {
@@ -60,8 +64,8 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "Analyse DZM B en cours...");
     try {
       const reponse = await assistantIA(
-        "Analyse detaillee de DZM B uniquement : factures, paiements, CA, clients principaux.",
-        [], supabase, genAI
+        "Analyse detaillee de DZM B : factures, paiements, CA, clients principaux.",
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Analyse DZM B\n\n" + reponse);
     } catch (e) {
@@ -76,7 +80,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     try {
       const reponse = await assistantIA(
         "Compare DZM A vs DZM B. Qui performe mieux ? Donne un verdict final.",
-        [], supabase, genAI
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Duel DZM A vs DZM B\n\n" + reponse);
     } catch (e) {
@@ -89,28 +93,19 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     const chatId = msg.chat.id;
     try {
       const { data } = await supabase
-        .from("factures")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(5);
-
-      if (!data || !data.length) {
-        bot.sendMessage(chatId, "Aucune facture trouvee.");
-        return;
-      }
-
+        .from("factures").select("*")
+        .order("created_at", { ascending: false }).limit(5);
+      if (!data?.length) return bot.sendMessage(chatId, "Aucune facture.");
       let texte = "5 Dernieres Factures\n\n";
       data.forEach(f => {
-        const statut = f.statut === "paye" ? "OK" : f.statut === "anomalie" ? "ANOMALIE" : "EN ATTENTE";
         texte += f.numero_facture + "\n";
         texte += "Client : " + f.client + "\n";
         texte += "Structure : " + f.structure + "\n";
         texte += "Montant : " + fmt(f.total_ttc) + "\n";
         texte += "Casiers : " + f.nombre_casiers + "\n";
         texte += "Date : " + f.date_facture + "\n";
-        texte += "Statut : " + statut + "\n\n";
+        texte += "Statut : " + f.statut + "\n\n";
       });
-
       bot.sendMessage(chatId, texte);
     } catch (e) {
       bot.sendMessage(chatId, "Erreur.");
@@ -122,26 +117,17 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     const chatId = msg.chat.id;
     try {
       const { data } = await supabase
-        .from("paiements_mobile")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(5);
-
-      if (!data || !data.length) {
-        bot.sendMessage(chatId, "Aucun paiement trouve.");
-        return;
-      }
-
+        .from("paiements_mobile").select("*")
+        .order("created_at", { ascending: false }).limit(5);
+      if (!data?.length) return bot.sendMessage(chatId, "Aucun paiement.");
       let texte = "5 Derniers Paiements\n\n";
       data.forEach(p => {
         texte += p.transaction_id + "\n";
         texte += "Montant : " + fmt(p.montant) + "\n";
-        texte += "Operateur : " + (p.operateur || "-") + "\n";
         texte += "Structure : " + p.structure + "\n";
         texte += "Facture : " + (p.reference_facture || "Non lie") + "\n";
         texte += "Statut : " + p.statut + "\n\n";
       });
-
       bot.sendMessage(chatId, texte);
     } catch (e) {
       bot.sendMessage(chatId, "Erreur.");
@@ -154,8 +140,8 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "Analyse de l'activite...");
     try {
       const reponse = await assistantIA(
-        "Qu'est-ce qui s'est passe aujourd'hui dans ETS DZM ? Factures, paiements, modifications.",
-        [], supabase, genAI
+        "Resume l'activite d'aujourd'hui pour ETS DZM.",
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Activite du Jour\n\n" + reponse);
     } catch (e) {
@@ -169,8 +155,8 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "Verification en cours...");
     try {
       const reponse = await assistantIA(
-        "Analyse les points de vigilance : totaux incoherents, TVA incorrecte, casiers suspects. Donne 2 conseils de gestion.",
-        [], supabase, genAI
+        "Analyse les points de vigilance : totaux incoherents, TVA incorrecte, casiers suspects. Donne 2 conseils.",
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Points de Vigilance\n\n" + reponse);
     } catch (e) {
@@ -184,8 +170,8 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "Analyse des produits...");
     try {
       const reponse = await assistantIA(
-        "Quels sont les top 3 produits moteurs ? Casiers vendus, CA et part de vente pour chacun.",
-        [], supabase, genAI
+        "Top 3 produits moteurs avec casiers vendus, CA et part de vente.",
+        [], supabase, null
       );
       bot.sendMessage(chatId, "Produits Moteurs\n\n" + reponse);
     } catch (e) {
@@ -196,7 +182,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
   // /export
   bot.onText(/\/export/, async (msg) => {
     bot.sendMessage(msg.chat.id,
-      "Export Excel\n\nEnvoyez votre email pour recevoir l'export :\n\n/email votre@email.com"
+      "Export Excel\n\nEnvoyez votre email :\n\n/email votre@email.com"
     );
   });
 
@@ -211,16 +197,16 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
         "https://dzm-backend-api.onrender.com/api/export/email",
         { email }
       );
-      bot.sendMessage(chatId, "Export envoye avec succes a " + email + " !\n\nVous recevrez 3 fichiers Excel.");
+      bot.sendMessage(chatId, "Export envoye a " + email + " !\n3 fichiers Excel joints.");
     } catch (e) {
       bot.sendMessage(chatId, "Erreur lors de l'envoi. Verifiez la configuration Gmail.");
     }
   });
 
-  // Photo -> OCR
+  // ─── Photo → OCR complet + sauvegarde ───
   bot.on("photo", async (msg) => {
     const chatId = msg.chat.id;
-    const processing = await bot.sendMessage(chatId, "Image recue - Analyse OCR Gemini en cours...");
+    const processing = await bot.sendMessage(chatId, "Image recue - OCR Groq en cours...");
     try {
       const photoId = msg.photo[msg.photo.length - 1].file_id;
       const fileInfo = await bot.getFile(photoId);
@@ -242,36 +228,53 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
       );
       const d = ocrRes.data.data;
 
-      const texte = "Extraction OCR reussie (" + (d.confiance || "?") + "% confiance)\n\n" +
-        "Numero : " + (d.numero_facture || "Non detecte") + "\n" +
-        "Client : " + (d.client || "Non detecte") + "\n" +
-        "Montant TTC : " + (d.total_ttc ? fmt(d.total_ttc) : "Non detecte") + "\n" +
-        "Casiers : " + (d.nombre_casiers || "Non detecte") + "\n" +
-        "Date : " + (d.date_facture || "Non detectee") + "\n" +
-        "Structure : " + (d.structure || "Non detectee");
+      // Stocker les données OCR complètes
+      const msgId = msg.message_id.toString();
+      ocrPending[msgId] = d;
 
-      await bot.deleteMessage(chatId, processing.message_id);
+      // Afficher résumé
+      let texte = "Extraction OCR reussie (" + (d.confiance || "?") + "% confiance)\n\n";
+      texte += "Numero : " + (d.numero_facture || "Non detecte") + "\n";
+      texte += "Client : " + (d.client || "Non detecte") + "\n";
+      texte += "Montant TTC : " + (d.total_ttc ? fmt(d.total_ttc) : "Non detecte") + "\n";
+      texte += "Total HT : " + (d.total_ht ? fmt(d.total_ht) : "Non detecte") + "\n";
+      texte += "TVA : " + (d.tva ? fmt(d.tva) : "Non detecte") + "\n";
+      texte += "Ristourne : " + (d.ristourne ? fmt(d.ristourne) : "Non detecte") + "\n";
+      texte += "Casiers : " + (d.nombre_casiers || "Non detecte") + "\n";
+      texte += "Casiers retournes : " + (d.casiers_retournes || "Non detecte") + "\n";
+      texte += "Date : " + (d.date_facture || "Non detectee") + "\n";
+      texte += "Structure : " + (d.structure || "DZM A") + "\n";
+
+      if (d.produits && d.produits.length > 0) {
+        texte += "\nProduits (" + d.produits.length + ") :\n";
+        d.produits.forEach(p => {
+          texte += "- " + p.produit + " x" + p.quantite + " = " + fmt(p.total) + "\n";
+        });
+      }
+
+      await bot.deleteMessage(chatId, processing.message_id).catch(() => {});
       bot.sendMessage(chatId, texte, {
         reply_markup: {
           inline_keyboard: [[
-            { text: "Enregistrer", callback_data: "save_facture" },
+            { text: "Enregistrer tout", callback_data: "save_" + msgId },
             { text: "Ignorer", callback_data: "ignore" }
           ]]
         }
       });
     } catch (err) {
       await bot.deleteMessage(chatId, processing.message_id).catch(() => {});
-      bot.sendMessage(chatId, "Erreur OCR. Verifiez que le backend est actif.");
+      console.error("OCR photo error:", err.message);
+      bot.sendMessage(chatId, "Erreur OCR. Reessayez.");
     }
   });
 
-  // Messages texte libres -> Assistant IA
+  // Messages texte libres
   bot.on("message", async (msg) => {
     if (msg.text && !msg.text.startsWith("/") && msg.text.length > 3) {
       const chatId = msg.chat.id;
       const processing = await bot.sendMessage(chatId, "Analyse en cours...");
       try {
-        const reponse = await assistantIA(msg.text, [], supabase, genAI);
+        const reponse = await assistantIA(msg.text, [], supabase, null);
         await bot.deleteMessage(chatId, processing.message_id).catch(() => {});
         bot.sendMessage(chatId, reponse);
       } catch (e) {
@@ -280,14 +283,90 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     }
   });
 
-  // Callbacks boutons
+  // ─── Callbacks boutons ───
   bot.on("callback_query", async (query) => {
     const chatId = query.message.chat.id;
+
     if (query.data === "ignore") {
       bot.answerCallbackQuery(query.id, { text: "Ignore." });
-    } else if (query.data === "save_facture") {
-      bot.answerCallbackQuery(query.id, { text: "Enregistre !" });
-      bot.sendMessage(chatId, "Facture enregistree dans DZM Codex !");
+      bot.sendMessage(chatId, "Facture ignoree.");
+      return;
+    }
+
+    if (query.data.startsWith("save_")) {
+      const msgId = query.data.replace("save_", "");
+      const d = ocrPending[msgId];
+
+      if (!d) {
+        bot.answerCallbackQuery(query.id, { text: "Donnees expirées." });
+        bot.sendMessage(chatId, "Les donnees ont expire. Renvoyez la photo.");
+        return;
+      }
+
+      try {
+        // 1. Vérifier doublon
+        const { data: existing } = await supabase
+          .from("factures")
+          .select("id")
+          .eq("numero_facture", d.numero_facture)
+          .limit(1);
+
+        if (existing && existing.length > 0) {
+          bot.answerCallbackQuery(query.id, { text: "Doublon detecte !" });
+          bot.sendMessage(chatId, "Cette facture existe deja dans la base (" + d.numero_facture + ").");
+          delete ocrPending[msgId];
+          return;
+        }
+
+        // 2. Insérer la facture
+        const { data: factureInserted, error: factureError } = await supabase
+          .from("factures")
+          .insert([{
+            numero_facture: d.numero_facture || "OCR-" + Date.now(),
+            structure: d.structure || "DZM A",
+            client: d.client,
+            total_ht: d.total_ht,
+            tva: d.tva,
+            ristourne: d.ristourne,
+            total_ttc: d.total_ttc,
+            nombre_casiers: d.nombre_casiers,
+            casiers_retournes: d.casiers_retournes,
+            date_facture: d.date_facture,
+            statut: "en attente"
+          }])
+          .select();
+
+        if (factureError) throw new Error(factureError.message);
+
+        // 3. Insérer les produits
+        if (d.produits && d.produits.length > 0 && factureInserted[0]) {
+          const produits = d.produits.map(p => ({
+            facture_id: factureInserted[0].id,
+            produit: p.produit,
+            quantite: p.quantite,
+            prix_unitaire: p.prix_unitaire,
+            total: p.total
+          }));
+          await supabase.from("produits_facture").insert(produits);
+        }
+
+        // Nettoyer
+        delete ocrPending[msgId];
+
+        bot.answerCallbackQuery(query.id, { text: "Enregistre !" });
+        bot.sendMessage(chatId,
+          "Facture enregistree dans DZM Codex !\n\n" +
+          "N : " + (d.numero_facture || "Auto") + "\n" +
+          "Client : " + (d.client || "-") + "\n" +
+          "Montant : " + (d.total_ttc ? fmt(d.total_ttc) : "-") + "\n" +
+          "Produits : " + (d.produits?.length || 0) + " lignes enregistrees"
+        );
+
+      } catch (err) {
+        console.error("Save error:", err.message);
+        bot.answerCallbackQuery(query.id, { text: "Erreur !" });
+        bot.sendMessage(chatId, "Erreur enregistrement : " + err.message);
+      }
     }
   });
 
