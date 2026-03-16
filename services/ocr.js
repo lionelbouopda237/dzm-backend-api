@@ -7,7 +7,7 @@ async function analyseOCRFacture(imagePath, genAI) {
     const imageData = fs.readFileSync(imagePath);
     const base64Image = imageData.toString("base64");
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = `Tu es un expert en lecture de factures camerounaises.
 Analyse cette image de facture et extrais TOUTES les informations visibles.
@@ -67,7 +67,7 @@ async function analyseOCRPaiement(imagePath, genAI) {
     const imageData = fs.readFileSync(imagePath);
     const base64Image = imageData.toString("base64");
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = `Tu es un expert en lecture de captures SMS Mobile Money camerounais.
 Analyse cette image et extrais les informations de paiement.
