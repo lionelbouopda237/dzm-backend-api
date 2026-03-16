@@ -1,6 +1,6 @@
 // ─── Assistant IA DZM avec Gemini ───
 async function assistantIA(question, historique, supabase, genAI) {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   // Récupérer les données actuelles de Supabase
   const [
