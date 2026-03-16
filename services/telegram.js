@@ -5,26 +5,24 @@ const fmt = n => new Intl.NumberFormat("fr-FR").format(n) + " FCFA";
 module.exports = function setupTelegram(bot, supabase, genAI) {
 
   // ─── /start ───
-  bot.onText(/\/start/, async (msg) => {
-    const heure = new Date().getHours();
-    const salut = heure < 12 ? "🌅 Bonjour" : heure < 18 ? "☀️ Bon après-midi" : "🌙 Bonsoir";
-    const texte = `${salut} ! Je suis *l'Assistant IA DZM* 🤖\n\n` +
-      `Je gère les finances de *ETS DZM* en temps réel.\n\n` +
-      `*Menu principal :*\n` +
-      `📊 /vue\_generale — Vue propriétaire\n` +
-      `🏢 /dzm\_a — Analyse DZM A\n` +
-      `🏢 /dzm\_b — Analyse DZM B\n` +
-      `⚔️ /duel — DZM A vs DZM B\n` +
-      `📄 /factures — Dernières factures\n` +
-      `💳 /paiements — Derniers paiements\n` +
-      `📅 /activite — Activité du jour\n` +
-      `⚠️ /vigilance — Points de vigilance\n` +
-      `📦 /produits — Produits moteurs\n` +
-      `📤 /export — Export Excel par email\n` +
-      `🎤 Envoyez un *message vocal* pour une question\n` +
-      `📸 Envoyez une *photo* de facture pour l'OCR`;
-    bot.sendMessage(msg.chat.id, texte, { parse_mode: "Markdown" });
-  });
+ bot.onText(/\/start/, async (msg) => {
+  const heure = new Date().getHours();
+  const salut = heure < 12 ? "Bonjour" : heure < 18 ? "Bon apres-midi" : "Bonsoir";
+  const texte = salut + " ! Je suis l'Assistant IA DZM\n\n" +
+    "Menu principal :\n\n" +
+    "/vue_generale - Vue proprietaire\n" +
+    "/dzm_a - Analyse DZM A\n" +
+    "/dzm_b - Analyse DZM B\n" +
+    "/duel - DZM A vs DZM B\n" +
+    "/factures - Dernieres factures\n" +
+    "/paiements - Derniers paiements\n" +
+    "/activite - Activite du jour\n" +
+    "/vigilance - Points de vigilance\n" +
+    "/produits - Produits moteurs\n" +
+    "/export - Export Excel par email\n\n" +
+    "Envoyez une photo de facture pour OCR automatique !";
+  bot.sendMessage(msg.chat.id, texte);
+});
 
   // ─── Vue générale ───
   bot.onText(/\/vue_generale/, async (msg) => {
@@ -35,7 +33,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
         "Donne-moi une vue générale complète de ETS DZM : facturation globale, paiements, reste à payer, produits moteurs top 3. Sois précis et utilise les vraies données.",
         [], supabase, genAI
       );
-      bot.sendMessage(chatId, `📊 *Vue Générale Propriétaire*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `📊 *Vue Générale Propriétaire*\n\n${reponse}`;
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur lors de l'analyse.");
     }
@@ -47,7 +45,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "⏳ Analyse DZM A...");
     try {
       const reponse = await assistantIA("Analyse détaillée de DZM A uniquement : factures, paiements, CA, clients principaux.", [], supabase, genAI);
-      bot.sendMessage(chatId, `🏢 *Analyse DZM A*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `🏢 *Analyse DZM A*\n\n${reponse}`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -59,7 +57,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "⏳ Analyse DZM B...");
     try {
       const reponse = await assistantIA("Analyse détaillée de DZM B uniquement : factures, paiements, CA, clients principaux.", [], supabase, genAI);
-      bot.sendMessage(chatId, `🏢 *Analyse DZM B*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `🏢 *Analyse DZM B*\n\n${reponse}`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -71,7 +69,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "⏳ Comparaison en cours...");
     try {
       const reponse = await assistantIA("Compare DZM A vs DZM B de façon détaillée. Qui performe mieux ? Sur quels critères ? Donne un verdict final.", [], supabase, genAI);
-      bot.sendMessage(chatId, `⚔️ *Duel DZM A vs DZM B*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `⚔️ *Duel DZM A vs DZM B*\n\n${reponse}`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -91,7 +89,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
         texte += `   🏢 ${f.structure} | 💰 ${fmt(f.total_ttc)}\n`;
         texte += `   📦 ${f.nombre_casiers} casiers | 📅 ${f.date_facture}\n\n`;
       });
-      bot.sendMessage(chatId, texte, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, texte);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -110,7 +108,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
         texte += `   💰 ${fmt(p.montant)} | 📱 ${p.operateur || "—"}\n`;
         texte += `   🔗 ${p.reference_facture || "Non lié"} | ${p.structure}\n\n`;
       });
-      bot.sendMessage(chatId, texte, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, texte);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -122,7 +120,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "⏳ Analyse de l'activité...");
     try {
       const reponse = await assistantIA("Qu'est-ce qui s'est passé aujourd'hui dans ETS DZM ? Factures créées, paiements enregistrés, modifications. Sois précis.", [], supabase, genAI);
-      bot.sendMessage(chatId, `📅 *Activité du Jour*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `📅 *Activité du Jour*\n\n${reponse}`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -134,7 +132,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "⏳ Vérification en cours...");
     try {
       const reponse = await assistantIA("Analyse les points de vigilance : totaux incohérents, TVA incorrecte, casiers suspects, produits inconnus. Donne aussi 2 conseils de gestion.", [], supabase, genAI);
-      bot.sendMessage(chatId, `⚠️ *Points de Vigilance*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `⚠️ *Points de Vigilance*\n\n${reponse}`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -146,7 +144,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     bot.sendMessage(chatId, "⏳ Analyse des produits...");
     try {
       const reponse = await assistantIA("Quels sont les top 3 produits moteurs ? Donne casiers vendus, CA et part de vente pour chacun.", [], supabase, genAI);
-      bot.sendMessage(chatId, `📦 *Produits Moteurs*\n\n${reponse}`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `📦 *Produits Moteurs*\n\n${reponse}`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur.");
     }
@@ -155,8 +153,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
   // ─── Export par email ───
   bot.onText(/\/export/, async (msg) => {
     bot.sendMessage(msg.chat.id,
-      "📤 *Export Excel*\n\nEnvoyez votre email pour recevoir l'export complet :\n\nFormat : /email votre@email.com",
-      { parse_mode: "Markdown" }
+      "📤 *Export Excel*\n\nEnvoyez votre email pour recevoir l'export complet :\n\nFormat : /email votre@email.com"
     );
   });
 
@@ -167,7 +164,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
     try {
       const axios = require("axios");
       await axios.post(`${process.env.BACKEND_URL}/api/export/email`, { email });
-      bot.sendMessage(chatId, `✅ Export envoyé avec succès à *${email}* !\n\nVous recevrez 3 fichiers Excel.`, { parse_mode: "Markdown" });
+      bot.sendMessage(chatId, `✅ Export envoyé avec succès à *${email}* !\n\nVous recevrez 3 fichiers Excel.`);
     } catch (_) {
       bot.sendMessage(chatId, "❌ Erreur lors de l'envoi. Vérifiez la configuration Gmail.");
     }
@@ -230,7 +227,7 @@ module.exports = function setupTelegram(bot, supabase, genAI) {
       try {
         const reponse = await assistantIA(msg.text, [], supabase, genAI);
         await bot.deleteMessage(chatId, processing.message_id);
-        bot.sendMessage(chatId, reponse, { parse_mode: "Markdown" });
+        bot.sendMessage(chatId, reponse, );
       } catch (_) {
         bot.sendMessage(chatId, "❌ Erreur lors de l'analyse.");
       }
