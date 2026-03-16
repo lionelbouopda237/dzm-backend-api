@@ -12,7 +12,6 @@ const { assistantIA } = require("./services/assistant");
 const { envoyerAlerteQuotidienne } = require("./services/alerts");
 const cron = require("node-cron");
 const fs = require("fs");
-const path = require("path");
 
 // ─── Initialisation ───
 const app = express();
@@ -25,25 +24,21 @@ const supabase = createClient(
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: true });
+// ─── Bot Telegram en mode WEBHOOK ───
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: false });
 
 // ─── Middleware ───
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "10mb" }));
-// Webhook Telegram
-app.post("/webhook", (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
 
-// Envoyer rapport manuel
-app.post("/api/telegram/rapport", async (req, res) => {
+// ─── Route Webhook Telegram (DOIT être avant tout) ───
+app.post(`/webhook`, (req, res) => {
   try {
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-    await envoyerAlerteQuotidienne(bot, supabase, genAI);
-    res.json({ success: true, message: "Rapport envoyé" });
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Webhook error:", err);
+    res.sendStatus(200);
   }
 });
 
@@ -59,7 +54,7 @@ app.post("/api/ocr/facture", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Aucune image reçue" });
     const result = await analyseOCRFacture(req.file.path, genAI);
-    fs.unlinkSync(req.file.path);
+    if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.json({ success: true, data: result });
   } catch (err) {
     console.error("OCR Facture erreur:", err.message);
@@ -72,7 +67,7 @@ app.post("/api/ocr/paiement", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Aucune image reçue" });
     const result = await analyseOCRPaiement(req.file.path, genAI);
-    fs.unlinkSync(req.file.path);
+    if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.json({ success: true, data: result });
   } catch (err) {
     console.error("OCR Paiement erreur:", err.message);
@@ -88,7 +83,6 @@ app.post("/api/assistant", async (req, res) => {
     const reponse = await assistantIA(question, historique || [], supabase, genAI);
     res.json({ success: true, reponse });
   } catch (err) {
-    console.error("Assistant IA erreur:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -145,7 +139,7 @@ app.get("/api/export/:table", async (req, res) => {
   }
 });
 
-// ─── Export complet par email ───
+// ─── Export par email ───
 app.post("/api/export/email", async (req, res) => {
   try {
     const { email } = req.body;
@@ -173,17 +167,7 @@ app.post("/api/export/email", async (req, res) => {
       from: `"DZM Codex" <${process.env.GMAIL_USER}>`,
       to: email,
       subject: `📊 Export DZM Codex — ${new Date().toLocaleDateString("fr-FR")}`,
-      html: `
-        <h2>📊 Export DZM Codex</h2>
-        <p>Bonjour,</p>
-        <p>Veuillez trouver en pièces jointes l'export complet de la base de données DZM.</p>
-        <ul>
-          <li>✅ Factures (${factures?.length || 0} entrées)</li>
-          <li>✅ Paiements Mobile Money (${paiements?.length || 0} entrées)</li>
-          <li>✅ Produits facturés (${produits?.length || 0} entrées)</li>
-        </ul>
-        <p>Cordialement,<br><strong>Assistant IA DZM</strong></p>
-      `,
+      html: `<h2>📊 Export DZM Codex</h2><p>Veuillez trouver en pièces jointes l'export complet.</p>`,
       attachments: [
         { filename: "DZM_Factures.xlsx",  content: bufFactures },
         { filename: "DZM_Paiements.xlsx", content: bufPaiements },
@@ -197,21 +181,30 @@ app.post("/api/export/email", async (req, res) => {
   }
 });
 
-// ─── Bot Telegram ───
+// ─── Rapport Telegram manuel ───
+app.post("/api/telegram/rapport", async (req, res) => {
+  try {
+    await envoyerAlerteQuotidienne(bot, supabase, genAI);
+    res.json({ success: true, message: "Rapport envoyé sur Telegram" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Bot Telegram commandes ───
 require("./services/telegram")(bot, supabase, genAI);
 
-// ─── Alerte quotidienne (tous les jours à 8h) ───
+// ─── Alerte quotidienne (8h heure Cameroun) ───
 cron.schedule("0 8 * * *", async () => {
-  console.log("⏰ Envoi alerte quotidienne...");
   await envoyerAlerteQuotidienne(bot, supabase, genAI);
 }, { timezone: "Africa/Douala" });
 
 // ─── Démarrage ───
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`\n✅ DZM Backend démarré sur http://localhost:${PORT}`);
-  console.log(`📊 Supabase : ${process.env.SUPABASE_URL ? "✅ Configuré" : "❌ Manquant"}`);
-  console.log(`🤖 Gemini   : ${process.env.GEMINI_API_KEY ? "✅ Configuré" : "❌ Manquant"}`);
-  console.log(`📱 Telegram : ${process.env.TELEGRAM_BOT_TOKEN ? "✅ Configuré" : "❌ Manquant"}`);
-  console.log(`📧 Gmail    : ${process.env.GMAIL_USER ? "✅ Configuré" : "❌ Manquant"}\n`);
+  console.log(`✅ DZM Backend démarré sur http://localhost:${PORT}`);
+  console.log(`📊 Supabase  : ${process.env.SUPABASE_URL ? "✅ Configuré" : "❌ Manquant"}`);
+  console.log(`🤖 Gemini    : ${process.env.GEMINI_API_KEY ? "✅ Configuré" : "❌ Manquant"}`);
+  console.log(`📱 Telegram  : ${process.env.TELEGRAM_BOT_TOKEN ? "✅ Configuré" : "❌ Manquant"}`);
+  console.log(`📧 Gmail     : ${process.env.GMAIL_USER ? "✅ Configuré" : "❌ Manquant"}`);
 });
