@@ -3,7 +3,6 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const { createClient } = require("@supabase/supabase-js");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const nodemailer = require("nodemailer");
 const TelegramBot = require("node-telegram-bot-api");
 const { generateExcel } = require("./services/export");
@@ -22,17 +21,15 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// ─── Bot Telegram en mode WEBHOOK ───
+// ─── Bot Telegram ───
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: false });
 
 // ─── Middleware ───
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "10mb" }));
 
-// ─── Route Webhook Telegram (DOIT être avant tout) ───
-app.post(`/webhook`, (req, res) => {
+// ─── Webhook Telegram ───
+app.post("/webhook", (req, res) => {
   try {
     bot.processUpdate(req.body);
     res.sendStatus(200);
@@ -45,15 +42,15 @@ app.post(`/webhook`, (req, res) => {
 // ─── Health check ───
 app.get("/health", (_, res) => res.json({
   status: "ok",
-  service: "DZM Backend",
+  service: "DZM Backend v2 - Groq",
   timestamp: new Date().toISOString()
 }));
 
 // ─── OCR Facture ───
 app.post("/api/ocr/facture", upload.single("image"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Aucune image reçue" });
-    const result = await analyseOCRFacture(req.file.path, genAI);
+    if (!req.file) return res.status(400).json({ error: "Aucune image recue" });
+    const result = await analyseOCRFacture(req.file.path, null);
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.json({ success: true, data: result });
   } catch (err) {
@@ -62,11 +59,11 @@ app.post("/api/ocr/facture", upload.single("image"), async (req, res) => {
   }
 });
 
-// ─── OCR Paiement Mobile Money ───
+// ─── OCR Paiement ───
 app.post("/api/ocr/paiement", upload.single("image"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Aucune image reçue" });
-    const result = await analyseOCRPaiement(req.file.path, genAI);
+    if (!req.file) return res.status(400).json({ error: "Aucune image recue" });
+    const result = await analyseOCRPaiement(req.file.path, null);
     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.json({ success: true, data: result });
   } catch (err) {
@@ -80,14 +77,14 @@ app.post("/api/assistant", async (req, res) => {
   try {
     const { question, historique } = req.body;
     if (!question) return res.status(400).json({ error: "Question manquante" });
-    const reponse = await assistantIA(question, historique || [], supabase, genAI);
+    const reponse = await assistantIA(question, historique || [], supabase, null);
     res.json({ success: true, reponse });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ─── Stats dashboard ───
+// ─── Stats ───
 app.get("/api/stats", async (req, res) => {
   try {
     const [
@@ -103,19 +100,10 @@ app.get("/api/stats", async (req, res) => {
       supabase.from("paiements_mobile").select("montant").eq("statut", "payé"),
       supabase.from("factures").select("nombre_casiers")
     ]);
-
     const montantFacture = (montantsFactures || []).reduce((s, f) => s + (f.total_ttc || 0), 0);
     const montantRecu = (montantsPaiements || []).reduce((s, p) => s + (p.montant || 0), 0);
     const totalCasiers = (casiers || []).reduce((s, f) => s + (f.nombre_casiers || 0), 0);
-
-    res.json({
-      totalFactures,
-      totalPaiements,
-      montantFacture,
-      montantRecu,
-      resteAPayer: montantFacture - montantRecu,
-      totalCasiers
-    });
+    res.json({ totalFactures, totalPaiements, montantFacture, montantRecu, resteAPayer: montantFacture - montantRecu, totalCasiers });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -127,10 +115,8 @@ app.get("/api/export/:table", async (req, res) => {
     const { table } = req.params;
     const tables = ["factures", "produits_facture", "paiements_mobile"];
     if (!tables.includes(table)) return res.status(400).json({ error: "Table invalide" });
-
     const { data } = await supabase.from(table).select("*").order("created_at", { ascending: false });
     const buffer = await generateExcel(table, data || []);
-
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename=DZM_${table}_${new Date().toISOString().split("T")[0]}.xlsx`);
     res.send(buffer);
@@ -139,72 +125,64 @@ app.get("/api/export/:table", async (req, res) => {
   }
 });
 
-// ─── Export par email ───
+// ─── Export Email ───
 app.post("/api/export/email", async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Email manquant" });
-
     const [{ data: factures }, { data: paiements }, { data: produits }] = await Promise.all([
       supabase.from("factures").select("*"),
       supabase.from("paiements_mobile").select("*"),
       supabase.from("produits_facture").select("*")
     ]);
-
     const bufFactures  = await generateExcel("factures", factures || []);
     const bufPaiements = await generateExcel("paiements_mobile", paiements || []);
     const bufProduits  = await generateExcel("produits_facture", produits || []);
-
     const transporter = nodemailer.createTransporter({
       service: "gmail",
-      auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_APP_PASSWORD
-      }
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD }
     });
-
     await transporter.sendMail({
       from: `"DZM Codex" <${process.env.GMAIL_USER}>`,
       to: email,
-      subject: `📊 Export DZM Codex — ${new Date().toLocaleDateString("fr-FR")}`,
-      html: `<h2>📊 Export DZM Codex</h2><p>Veuillez trouver en pièces jointes l'export complet.</p>`,
+      subject: `Export DZM Codex - ${new Date().toLocaleDateString("fr-FR")}`,
+      html: `<h2>Export DZM Codex</h2><p>3 fichiers Excel en pièces jointes.</p>`,
       attachments: [
         { filename: "DZM_Factures.xlsx",  content: bufFactures },
         { filename: "DZM_Paiements.xlsx", content: bufPaiements },
         { filename: "DZM_Produits.xlsx",  content: bufProduits }
       ]
     });
-
-    res.json({ success: true, message: `Export envoyé à ${email}` });
+    res.json({ success: true, message: `Export envoye a ${email}` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Rapport Telegram manuel ───
+// ─── Rapport Telegram ───
 app.post("/api/telegram/rapport", async (req, res) => {
   try {
-    await envoyerAlerteQuotidienne(bot, supabase, genAI);
-    res.json({ success: true, message: "Rapport envoyé sur Telegram" });
+    await envoyerAlerteQuotidienne(bot, supabase, null);
+    res.json({ success: true, message: "Rapport envoye" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ─── Bot Telegram commandes ───
-require("./services/telegram")(bot, supabase, genAI);
+require("./services/telegram")(bot, supabase, null);
 
-// ─── Alerte quotidienne (8h heure Cameroun) ───
+// ─── Alerte quotidienne 8h Cameroun ───
 cron.schedule("0 8 * * *", async () => {
-  await envoyerAlerteQuotidienne(bot, supabase, genAI);
+  await envoyerAlerteQuotidienne(bot, supabase, null);
 }, { timezone: "Africa/Douala" });
 
 // ─── Démarrage ───
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`✅ DZM Backend démarré sur http://localhost:${PORT}`);
-  console.log(`📊 Supabase  : ${process.env.SUPABASE_URL ? "✅ Configuré" : "❌ Manquant"}`);
-  console.log(`🤖 Gemini    : ${process.env.GEMINI_API_KEY ? "✅ Configuré" : "❌ Manquant"}`);
-  console.log(`📱 Telegram  : ${process.env.TELEGRAM_BOT_TOKEN ? "✅ Configuré" : "❌ Manquant"}`);
-  console.log(`📧 Gmail     : ${process.env.GMAIL_USER ? "✅ Configuré" : "❌ Manquant"}`);
+  console.log(`✅ DZM Backend v2 Groq - http://localhost:${PORT}`);
+  console.log(`📊 Supabase  : ${process.env.SUPABASE_URL ? "✅" : "❌"}`);
+  console.log(`🤖 Groq      : ${process.env.GROQ_API_KEY ? "✅" : "❌"}`);
+  console.log(`📱 Telegram  : ${process.env.TELEGRAM_BOT_TOKEN ? "✅" : "❌"}`);
+  console.log(`📧 Gmail     : ${process.env.GMAIL_USER ? "✅" : "❌"}`);
 });
