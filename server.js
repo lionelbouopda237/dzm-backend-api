@@ -25,11 +25,27 @@ const supabase = createClient(
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: true });
 
 // ─── Middleware ───
 app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
 app.use(express.json({ limit: "10mb" }));
+// Webhook Telegram
+app.post("/webhook", (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// Envoyer rapport manuel
+app.post("/api/telegram/rapport", async (req, res) => {
+  try {
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    await envoyerAlerteQuotidienne(bot, supabase, genAI);
+    res.json({ success: true, message: "Rapport envoyé" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── Health check ───
 app.get("/health", (_, res) => res.json({
