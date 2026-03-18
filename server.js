@@ -17,7 +17,256 @@ const FormData = require('form-data');
 const app = express();
 const upload = multer({ dest: '/tmp/uploads/', limits: { fileSize: 12 * 1024 * 1024 } });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-const bot = process.env.TELEGRAM_BOT_TOKEN ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: false }) : null;
+
+// =========================
+// TELEGRAM
+// =========================
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
+const bot = TELEGRAM_TOKEN
+  ? new TelegramBot(TELEGRAM_TOKEN, {
+      polling: {
+        autoStart: true,
+        interval: 1000,
+        params: {
+          timeout: 10,
+        },
+      },
+    })
+  : null;
+
+if (bot) {
+  bot
+    .deleteWebHook()
+    .then(() => console.log('Telegram webhook removed, polling enabled'))
+    .catch((err) => console.error('Telegram deleteWebHook error:', err?.message || err));
+
+  console.log('Telegram bot polling started');
+
+  bot.onText(/\/start/, async (msg) => {
+    await bot.sendMessage(
+      msg.chat.id,
+      [
+        'Bienvenue sur le bot DZM.',
+        '',
+        'Commandes disponibles :',
+        '/help',
+        '/status',
+        '/brief',
+        '/bilan',
+        '/alertes',
+        '/emballages',
+        '/compare',
+        '/factures',
+        '/paiements',
+        '/ia <question>',
+      ].join('\n')
+    );
+  });
+
+  bot.onText(/\/help/, async (msg) => {
+    await bot.sendMessage(
+      msg.chat.id,
+      [
+        'Commandes disponibles :',
+        '',
+        '/start',
+        '/help',
+        '/status',
+        '/brief',
+        '/bilan',
+        '/alertes',
+        '/emballages',
+        '/compare',
+        '/factures',
+        '/paiements',
+        '/ia <question>',
+      ].join('\n')
+    );
+  });
+
+  bot.onText(/\/status/, async (msg) => {
+    try {
+      const dashboard = await buildDashboard();
+      await bot.sendMessage(
+        msg.chat.id,
+        [
+          '📊 État rapide DZM',
+          `Factures : ${dashboard.totalFactures}`,
+          `Paiements : ${dashboard.totalPaiements}`,
+          `Montant facturé : ${Number(dashboard.montantFacture || 0).toLocaleString('fr-FR')} FCFA`,
+          `Montant encaissé : ${Number(dashboard.montantRecu || 0).toLocaleString('fr-FR')} FCFA`,
+          `Reste à payer : ${Number(dashboard.resteAPayer || 0).toLocaleString('fr-FR')} FCFA`,
+        ].join('\n')
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur status : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/brief/, async (msg) => {
+    try {
+      const dashboard = await buildDashboard();
+      const emballages = await buildEmballagesSummary();
+      await bot.sendMessage(
+        msg.chat.id,
+        [
+          '🌅 Brief DZM',
+          `Factures : ${dashboard.totalFactures}`,
+          `Paiements : ${dashboard.totalPaiements}`,
+          `Montant encaissé : ${Number(dashboard.montantRecu || 0).toLocaleString('fr-FR')} FCFA`,
+          `Solde emballages global : ${Number(emballages.synthese?.solde || 0).toLocaleString('fr-FR')}`,
+          `Anomalies factures : ${dashboard.facturesAnomalie}`,
+        ].join('\n')
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur brief : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/bilan/, async (msg) => {
+    try {
+      const dashboard = await buildDashboard();
+      await bot.sendMessage(
+        msg.chat.id,
+        [
+          '🌙 Bilan DZM',
+          `Factures enregistrées : ${dashboard.totalFactures}`,
+          `Paiements enregistrés : ${dashboard.totalPaiements}`,
+          `Reste à payer : ${Number(dashboard.resteAPayer || 0).toLocaleString('fr-FR')} FCFA`,
+          `Factures en attente : ${dashboard.facturesEnAttente}`,
+          `Factures en anomalie : ${dashboard.facturesAnomalie}`,
+        ].join('\n')
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur bilan : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/alertes/, async (msg) => {
+    try {
+      const dashboard = await buildDashboard();
+      const lines = [
+        '🚨 Alertes DZM',
+        `Factures en anomalie : ${dashboard.facturesAnomalie}`,
+        `Factures en attente : ${dashboard.facturesEnAttente}`,
+      ];
+      if (dashboard.resteAPayer > 0) {
+        lines.push(`Reste à payer : ${Number(dashboard.resteAPayer).toLocaleString('fr-FR')} FCFA`);
+      }
+      await bot.sendMessage(msg.chat.id, lines.join('\n'));
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur alertes : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/emballages/, async (msg) => {
+    try {
+      const data = await buildEmballagesSummary();
+      const lines = ['📦 Gestion emballages vides'];
+      for (const row of data.summary || []) {
+        lines.push(
+          `${row.structure} — reçus: ${row.emballagesRecus}, renvoyés: ${row.emballagesRenvoyes}, solde: ${row.solde}, colis: ${row.colis}`
+        );
+      }
+      lines.push(
+        `Synthèse — reçus: ${data.synthese.emballagesRecus}, renvoyés: ${data.synthese.emballagesRenvoyes}, solde: ${data.synthese.solde}, colis: ${data.synthese.colis}`
+      );
+      await bot.sendMessage(msg.chat.id, lines.join('\n'));
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur emballages : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/compare/, async (msg) => {
+    try {
+      const dashboard = await buildDashboard();
+      const dzmA = dashboard.pieData?.find((x) => x.name === 'DZM A')?.value || 0;
+      const dzmB = dashboard.pieData?.find((x) => x.name === 'DZM B')?.value || 0;
+      await bot.sendMessage(
+        msg.chat.id,
+        [
+          '⚖️ Comparatif DZM A vs DZM B',
+          `DZM A : ${Number(dzmA).toLocaleString('fr-FR')} FCFA`,
+          `DZM B : ${Number(dzmB).toLocaleString('fr-FR')} FCFA`,
+        ].join('\n')
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur compare : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/factures/, async (msg) => {
+    try {
+      const { data, error } = await supabase
+        .from('factures')
+        .select('*')
+        .order('date_facture', { ascending: false })
+        .limit(5);
+      if (error) throw error;
+
+      const lines = ['🧾 Dernières factures'];
+      for (const f of data || []) {
+        lines.push(
+          `${f.numero_facture} — ${detectStructure(f.structure)} — ${Number(f.total_ttc || 0).toLocaleString('fr-FR')} FCFA`
+        );
+      }
+      await bot.sendMessage(msg.chat.id, lines.join('\n'));
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur factures : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/paiements/, async (msg) => {
+    try {
+      const { data, error } = await supabase
+        .from('paiements_mobile')
+        .select('*')
+        .order('date_paiement', { ascending: false })
+        .limit(5);
+      if (error) throw error;
+
+      const lines = ['💳 Derniers paiements'];
+      for (const p of data || []) {
+        lines.push(
+          `${p.transaction_id} — ${detectStructure(p.structure)} — ${Number(p.montant || 0).toLocaleString('fr-FR')} FCFA`
+        );
+      }
+      await bot.sendMessage(msg.chat.id, lines.join('\n'));
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur paiements : ${error.message}`);
+    }
+  });
+
+  bot.onText(/\/ia (.+)/, async (msg, match) => {
+    try {
+      const question = match?.[1]?.trim();
+      if (!question) {
+        await bot.sendMessage(msg.chat.id, 'Pose une question après /ia');
+        return;
+      }
+
+      const reponse = await assistantIA(question, [], supabase, null);
+      await bot.sendMessage(
+        msg.chat.id,
+        `Reformulation : tu veux que j’analyse la question suivante.\n\nQuestion : ${question}\n\n${reponse}`
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur IA : ${error.message}`);
+    }
+  });
+
+  bot.on('polling_error', (error) => {
+    console.error('Telegram polling error:', error?.message || error);
+  });
+
+  bot.on('message', (msg) => {
+    console.log('Telegram message received from chat:', msg.chat.id);
+  });
+} else {
+  console.log('Telegram bot disabled: missing TELEGRAM_BOT_TOKEN');
+}
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '20mb' }));
@@ -28,7 +277,9 @@ function getUploadedFile(req) {
   if (req.files?.file?.[0]) return req.files.file[0];
   return null;
 }
-function cleanFile(file) { if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path); }
+function cleanFile(file) {
+  if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+}
 function normalizeDate(value) {
   if (!value) return new Date().toISOString().slice(0, 10);
   const date = new Date(value);
@@ -61,31 +312,51 @@ async function buildEmballagesSummary() {
   for (const structure of ['DZM A', 'DZM B']) {
     base.set(structure, { structure, emballagesRecus: 0, emballagesRenvoyes: 0, solde: 0, colis: 0 });
   }
-  for (const row of (factures || [])) {
+  for (const row of factures || []) {
     const target = base.get(detectStructure(row.structure));
     target.emballagesRecus += Number(row.nombre_casiers || 0);
     const rows = byFacture.get(row.id) || [];
-    target.colis += rows.filter((item) => String(item.produit || '').toLowerCase().includes('colis')).reduce((s, item) => s + Number(item.quantite || 0), 0);
+    target.colis += rows
+      .filter((item) => String(item.produit || '').toLowerCase().includes('colis'))
+      .reduce((s, item) => s + Number(item.quantite || 0), 0);
   }
-  for (const row of (mouvements || [])) {
+  for (const row of mouvements || []) {
     const target = base.get(detectStructure(row.structure));
     target.emballagesRenvoyes += Number(row.emballages_vides || 0);
   }
-  const summary = Array.from(base.values()).map((item) => ({ ...item, solde: item.emballagesRecus - item.emballagesRenvoyes }));
-  const synthese = summary.reduce((acc, row) => {
-    acc.emballagesRecus += row.emballagesRecus;
-    acc.emballagesRenvoyes += row.emballagesRenvoyes;
-    acc.solde += row.solde;
-    acc.colis += row.colis;
-    return acc;
-  }, { emballagesRecus: 0, emballagesRenvoyes: 0, solde: 0, colis: 0 });
+  const summary = Array.from(base.values()).map((item) => ({
+    ...item,
+    solde: item.emballagesRecus - item.emballagesRenvoyes,
+  }));
+  const synthese = summary.reduce(
+    (acc, row) => {
+      acc.emballagesRecus += row.emballagesRecus;
+      acc.emballagesRenvoyes += row.emballagesRenvoyes;
+      acc.solde += row.solde;
+      acc.colis += row.colis;
+      return acc;
+    },
+    { emballagesRecus: 0, emballagesRenvoyes: 0, solde: 0, colis: 0 }
+  );
   return { summary, mouvements: mouvements || [], synthese };
 }
 function buildInvoiceWarnings(payload) {
   const warnings = [];
   const sumLines = (payload.produits || []).reduce((s, l) => s + Number(l.total || 0), 0);
-  if (payload.total_ht && Math.abs(Number(payload.total_ht) - sumLines) > 5) warnings.push('Le total HT ne correspond pas exactement à la somme des lignes.');
-  if (payload.total_ttc && payload.total_ht && payload.tva && Math.abs(Number(payload.total_ttc) - (Number(payload.total_ht) + Number(payload.tva) - Number(payload.ristourne || 0))) > 5) warnings.push('Le total TTC paraît incohérent avec HT, TVA et ristourne.');
+  if (payload.total_ht && Math.abs(Number(payload.total_ht) - sumLines) > 5) {
+    warnings.push('Le total HT ne correspond pas exactement à la somme des lignes.');
+  }
+  if (
+    payload.total_ttc &&
+    payload.total_ht &&
+    payload.tva &&
+    Math.abs(
+      Number(payload.total_ttc) -
+        (Number(payload.total_ht) + Number(payload.tva) - Number(payload.ristourne || 0))
+    ) > 5
+  ) {
+    warnings.push('Le total TTC paraît incohérent avec HT, TVA et ristourne.');
+  }
   if (!payload.client) warnings.push('Le client/structure commanditaire est vide.');
   return warnings;
 }
@@ -97,21 +368,38 @@ function buildPaymentWarnings(payload) {
   return warnings;
 }
 async function uploadToCloudinary(filePath, folder) {
-  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) return null;
+  if (
+    !process.env.CLOUDINARY_CLOUD_NAME ||
+    !process.env.CLOUDINARY_API_KEY ||
+    !process.env.CLOUDINARY_API_SECRET
+  ) {
+    return null;
+  }
   const form = new FormData();
   form.append('file', fs.createReadStream(filePath));
-  if (process.env.CLOUDINARY_UPLOAD_PRESET) form.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET);
+  if (process.env.CLOUDINARY_UPLOAD_PRESET) {
+    form.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET);
+  }
   form.append('folder', folder);
   const timestamp = Math.round(Date.now() / 1000);
   const crypto = require('crypto');
-  const paramsToSign = `folder=${folder}&timestamp=${timestamp}${process.env.CLOUDINARY_UPLOAD_PRESET ? `&upload_preset=${process.env.CLOUDINARY_UPLOAD_PRESET}` : ''}${process.env.CLOUDINARY_TRANSFORMATION ? `&transformation=${process.env.CLOUDINARY_TRANSFORMATION}` : ''}${process.env.CLOUDINARY_API_SECRET}`;
+  const paramsToSign = `folder=${folder}&timestamp=${timestamp}${
+    process.env.CLOUDINARY_UPLOAD_PRESET ? `&upload_preset=${process.env.CLOUDINARY_UPLOAD_PRESET}` : ''
+  }${process.env.CLOUDINARY_TRANSFORMATION ? `&transformation=${process.env.CLOUDINARY_TRANSFORMATION}` : ''}${
+    process.env.CLOUDINARY_API_SECRET
+  }`;
   const signature = crypto.createHash('sha1').update(paramsToSign).digest('hex');
   form.append('api_key', process.env.CLOUDINARY_API_KEY);
   form.append('timestamp', String(timestamp));
   form.append('signature', signature);
-  if (process.env.CLOUDINARY_TRANSFORMATION) form.append('transformation', process.env.CLOUDINARY_TRANSFORMATION);
+  if (process.env.CLOUDINARY_TRANSFORMATION) {
+    form.append('transformation', process.env.CLOUDINARY_TRANSFORMATION);
+  }
   const url = `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`;
-  const response = await axios.post(url, form, { headers: form.getHeaders(), maxBodyLength: Infinity });
+  const response = await axios.post(url, form, {
+    headers: form.getHeaders(),
+    maxBodyLength: Infinity,
+  });
   return { url: response.data.secure_url, public_id: response.data.public_id };
 }
 
@@ -133,12 +421,14 @@ function normalizeFacturePayload(body) {
     vendeur: body.vendeur || null,
     image_url: body.image_url || null,
     image_public_id: body.image_public_id || null,
-    produits: produits.map((line) => ({
-      produit: String(line.produit || '').trim(),
-      quantite: Number(line.quantite || 0),
-      prix_unitaire: Number(line.prix_unitaire ?? line.prixUnitaire ?? 0),
-      total: Number(line.total || 0),
-    })).filter((line) => line.produit),
+    produits: produits
+      .map((line) => ({
+        produit: String(line.produit || '').trim(),
+        quantite: Number(line.quantite || 0),
+        prix_unitaire: Number(line.prix_unitaire ?? line.prixUnitaire ?? 0),
+        total: Number(line.total || 0),
+      }))
+      .filter((line) => line.produit),
   };
 }
 function normalizePaiementPayload(body) {
@@ -169,14 +459,30 @@ async function hydrateFactures(rows) {
 }
 async function saveFactureWithLines(payload) {
   const normalized = normalizeFacturePayload(payload);
-  if (!normalized.numero_facture || !normalized.client) throw new Error('Numero de facture et client requis');
+  if (!normalized.numero_facture || !normalized.client) {
+    throw new Error('Numero de facture et client requis');
+  }
   const overwrite = Boolean(payload.overwrite);
-  const { data: existing } = await supabase.from('factures').select('id').eq('numero_facture', normalized.numero_facture).limit(1).maybeSingle();
-  if (existing?.id && !overwrite) throw new Error(`DOUBLON_FACTURE:${normalized.numero_facture}`);
+  const { data: existing } = await supabase
+    .from('factures')
+    .select('id')
+    .eq('numero_facture', normalized.numero_facture)
+    .limit(1)
+    .maybeSingle();
+
+  if (existing?.id && !overwrite) {
+    throw new Error(`DOUBLON_FACTURE:${normalized.numero_facture}`);
+  }
+
   const { produits, ...facture } = normalized;
   let inserted;
   if (existing?.id && overwrite) {
-    const { data, error } = await supabase.from('factures').update(facture).eq('id', existing.id).select('*').single();
+    const { data, error } = await supabase
+      .from('factures')
+      .update(facture)
+      .eq('id', existing.id)
+      .select('*')
+      .single();
     if (error) throw error;
     inserted = data;
     await supabase.from('produits_facture').delete().eq('facture_id', existing.id);
@@ -185,26 +491,48 @@ async function saveFactureWithLines(payload) {
     if (error) throw error;
     inserted = data;
   }
+
   if (produits.length) {
     const rows = produits.map((line) => ({ ...line, facture_id: inserted.id }));
     const { error: lineError } = await supabase.from('produits_facture').insert(rows);
     if (lineError) throw lineError;
   }
+
   const [hydrated] = await hydrateFactures([inserted]);
   return { ...hydrated, warnings: buildInvoiceWarnings(normalized) };
 }
 async function savePaiement(payload) {
   const normalized = normalizePaiementPayload(payload);
   if (!normalized.transaction_id) throw new Error('Transaction ID requis');
+
   const overwrite = Boolean(payload.overwrite);
-  const { data: existing } = await supabase.from('paiements_mobile').select('id').eq('transaction_id', normalized.transaction_id).limit(1).maybeSingle();
-  if (existing?.id && !overwrite) throw new Error(`DOUBLON_PAIEMENT:${normalized.transaction_id}`);
+  const { data: existing } = await supabase
+    .from('paiements_mobile')
+    .select('id')
+    .eq('transaction_id', normalized.transaction_id)
+    .limit(1)
+    .maybeSingle();
+
+  if (existing?.id && !overwrite) {
+    throw new Error(`DOUBLON_PAIEMENT:${normalized.transaction_id}`);
+  }
+
   let data;
   if (existing?.id && overwrite) {
-    ({ data } = await supabase.from('paiements_mobile').update(normalized).eq('id', existing.id).select('*').single());
+    const resp = await supabase
+      .from('paiements_mobile')
+      .update(normalized)
+      .eq('id', existing.id)
+      .select('*')
+      .single();
+    if (resp.error) throw resp.error;
+    data = resp.data;
   } else {
-    ({ data } = await supabase.from('paiements_mobile').insert(normalized).select('*').single());
+    const resp = await supabase.from('paiements_mobile').insert(normalized).select('*').single();
+    if (resp.error) throw resp.error;
+    data = resp.data;
   }
+
   return { ...data, warnings: buildPaymentWarnings(normalized) };
 }
 async function buildDashboard() {
@@ -212,92 +540,278 @@ async function buildDashboard() {
     supabase.from('factures').select('*').order('date_facture', { ascending: false }),
     supabase.from('paiements_mobile').select('*').order('date_paiement', { ascending: false }),
   ]);
+
   const facturesList = factures || [];
   const paiementsList = paiements || [];
   const hydratedFactures = await hydrateFactures(facturesList.slice(0, 8));
+
   const montantFacture = facturesList.reduce((s, f) => s + Number(f.total_ttc || 0), 0);
-  const montantRecu = paiementsList.filter((p) => p.statut === 'payé').reduce((s, p) => s + Number(p.montant || 0), 0);
+  const montantRecu = paiementsList
+    .filter((p) => p.statut === 'payé')
+    .reduce((s, p) => s + Number(p.montant || 0), 0);
+
   const totalCasiers = facturesList.reduce((s, f) => s + Number(f.nombre_casiers || 0), 0);
   const totalRetours = facturesList.reduce((s, f) => s + Number(f.casiers_retournes || 0), 0);
   const facturesEnAttente = facturesList.filter((f) => f.statut === 'en attente').length;
   const facturesAnomalie = facturesList.filter((f) => f.statut === 'anomalie').length;
+
   const monthMap = new Map();
   facturesList.forEach((row) => {
-    const key = new Date(row.date_facture || row.created_at || Date.now()).toLocaleDateString('fr-FR', { month: 'short' });
+    const key = new Date(row.date_facture || row.created_at || Date.now()).toLocaleDateString('fr-FR', {
+      month: 'short',
+    });
     if (!monthMap.has(key)) monthMap.set(key, { name: key, dzmA: 0, dzmB: 0 });
     const bucket = monthMap.get(key);
-    if (row.structure === 'DZM B') bucket.dzmB += Number(row.total_ttc || 0); else bucket.dzmA += Number(row.total_ttc || 0);
+    if (row.structure === 'DZM B') bucket.dzmB += Number(row.total_ttc || 0);
+    else bucket.dzmA += Number(row.total_ttc || 0);
   });
-  const pieRaw = { 'DZM A': facturesList.filter((f) => f.structure === 'DZM A').reduce((s, f) => s + Number(f.total_ttc || 0), 0), 'DZM B': facturesList.filter((f) => f.structure === 'DZM B').reduce((s, f) => s + Number(f.total_ttc || 0), 0) };
-  const { data: productRows } = await supabase.from('produits_facture').select('produit, quantite, prix_unitaire, total, facture_id, factures!inner(structure)');
+
+  const pieRaw = {
+    'DZM A': facturesList
+      .filter((f) => f.structure === 'DZM A')
+      .reduce((s, f) => s + Number(f.total_ttc || 0), 0),
+    'DZM B': facturesList
+      .filter((f) => f.structure === 'DZM B')
+      .reduce((s, f) => s + Number(f.total_ttc || 0), 0),
+  };
+
+  const { data: productRows } = await supabase
+    .from('produits_facture')
+    .select('produit, quantite, prix_unitaire, total, facture_id, factures!inner(structure)');
+
   const productMap = new Map();
   for (const row of (productRows || []).filter((row) => !isPackagingProduct(row.produit))) {
-    if (!productMap.has(row.produit)) productMap.set(row.produit, { produit: row.produit, quantite: 0, totalPu: 0, puCount: 0, caTotal: 0, factures: new Set(), structures: new Set() });
+    if (!productMap.has(row.produit)) {
+      productMap.set(row.produit, {
+        produit: row.produit,
+        quantite: 0,
+        totalPu: 0,
+        puCount: 0,
+        caTotal: 0,
+        factures: new Set(),
+        structures: new Set(),
+      });
+    }
     const entry = productMap.get(row.produit);
-    entry.quantite += Number(row.quantite || 0); entry.totalPu += Number(row.prix_unitaire || 0); entry.puCount += 1; entry.caTotal += Number(row.total || 0); entry.factures.add(row.facture_id); entry.structures.add(row.factures?.structure || 'DZM A');
+    entry.quantite += Number(row.quantite || 0);
+    entry.totalPu += Number(row.prix_unitaire || 0);
+    entry.puCount += 1;
+    entry.caTotal += Number(row.total || 0);
+    entry.factures.add(row.facture_id);
+    entry.structures.add(row.factures?.structure || 'DZM A');
   }
-  const topProducts = Array.from(productMap.values()).map((entry) => ({ produit: entry.produit, quantite: entry.quantite, prixUnitaire: entry.puCount ? Math.round(entry.totalPu / entry.puCount) : 0, caTotal: entry.caTotal, facturesAssociees: entry.factures.size, structure: Array.from(entry.structures).join(' / '), tendance: 'stable' })).sort((a, b) => b.caTotal - a.caTotal);
-  const recentActivity = [...hydratedFactures.slice(0, 4).map((f) => ({ time: f.date_facture, text: `Facture ${f.numero_facture} enregistrée pour ${f.client}`, type: 'facture' })), ...paiementsList.slice(0, 4).map((p) => ({ time: p.date_paiement, text: `Paiement ${p.transaction_id} de ${Number(p.montant || 0).toLocaleString('fr-FR')} FCFA`, type: 'paiement' }))].slice(0, 8);
-  return { totalFactures: facturesList.length, totalPaiements: paiementsList.length, montantFacture, montantRecu, resteAPayer: montantFacture - montantRecu, totalCasiers, totalRetours, facturesEnAttente, facturesAnomalie, chartData: Array.from(monthMap.values()), pieData: Object.entries(pieRaw).filter(([, value]) => value > 0).map(([name, value]) => ({ name, value })), topProducts: topProducts.slice(0, 8), recentInvoices: hydratedFactures, recentPayments: paiementsList.slice(0, 8), recentActivity };
+
+  const topProducts = Array.from(productMap.values())
+    .map((entry) => ({
+      produit: entry.produit,
+      quantite: entry.quantite,
+      prixUnitaire: entry.puCount ? Math.round(entry.totalPu / entry.puCount) : 0,
+      caTotal: entry.caTotal,
+      facturesAssociees: entry.factures.size,
+      structure: Array.from(entry.structures).join(' / '),
+      tendance: 'stable',
+    }))
+    .sort((a, b) => b.caTotal - a.caTotal);
+
+  const recentActivity = [
+    ...hydratedFactures.slice(0, 4).map((f) => ({
+      time: f.date_facture,
+      text: `Facture ${f.numero_facture} enregistrée pour ${f.client}`,
+      type: 'facture',
+    })),
+    ...paiementsList.slice(0, 4).map((p) => ({
+      time: p.date_paiement,
+      text: `Paiement ${p.transaction_id} de ${Number(p.montant || 0).toLocaleString('fr-FR')} FCFA`,
+      type: 'paiement',
+    })),
+  ].slice(0, 8);
+
+  return {
+    totalFactures: facturesList.length,
+    totalPaiements: paiementsList.length,
+    montantFacture,
+    montantRecu,
+    resteAPayer: montantFacture - montantRecu,
+    totalCasiers,
+    totalRetours,
+    facturesEnAttente,
+    facturesAnomalie,
+    chartData: Array.from(monthMap.values()),
+    pieData: Object.entries(pieRaw)
+      .filter(([, value]) => value > 0)
+      .map(([name, value]) => ({ name, value })),
+    topProducts: topProducts.slice(0, 8),
+    recentInvoices: hydratedFactures,
+    recentPayments: paiementsList.slice(0, 8),
+    recentActivity,
+  };
 }
 
 async function buildRapprochements() {
   const [{ data: paiements }, { data: factures }, { data: links }] = await Promise.all([
     supabase.from('paiements_mobile').select('*').order('date_paiement', { ascending: false }),
     supabase.from('factures').select('*').order('date_facture', { ascending: false }),
-    supabase.from('rapprochements_factures_paiements').select('*').order('created_at', { ascending: false })
+    supabase.from('rapprochements_factures_paiements').select('*').order('created_at', { ascending: false }),
   ]);
-  const facturesById = new Map((factures || []).map(f => [f.id, f]));
-  const existingByPayment = new Map((links || []).map(l => [l.paiement_id, l]));
+
+  const facturesById = new Map((factures || []).map((f) => [f.id, f]));
+  const existingByPayment = new Map((links || []).map((l) => [l.paiement_id, l]));
+
   return (paiements || []).map((p) => {
     const linked = existingByPayment.get(p.id);
     const linkedFacture = linked?.facture_id ? facturesById.get(linked.facture_id) : null;
+
     if (linkedFacture) {
-      return { paiement_id: p.id, transaction_id: p.transaction_id, structure: detectStructure(p.structure), montant_paiement: Number(p.montant || 0), date_paiement: p.date_paiement, facture_id: linkedFacture.id, numero_facture: linkedFacture.numero_facture, montant_facture: Number(linkedFacture.total_ttc || 0), score: Number(linked.score || 100), statut: 'rapproché', suggestion: 'Rapprochement validé' };
+      return {
+        paiement_id: p.id,
+        transaction_id: p.transaction_id,
+        structure: detectStructure(p.structure),
+        montant_paiement: Number(p.montant || 0),
+        date_paiement: p.date_paiement,
+        facture_id: linkedFacture.id,
+        numero_facture: linkedFacture.numero_facture,
+        montant_facture: Number(linkedFacture.total_ttc || 0),
+        score: Number(linked.score || 100),
+        statut: 'rapproché',
+        suggestion: 'Rapprochement validé',
+      };
     }
-    const candidates = (factures || []).filter((f) => detectStructure(f.structure) === detectStructure(p.structure));
-    const scored = candidates.map((f) => {
-      let score = 25;
-      const amountGap = Math.abs(Number(f.total_ttc || 0) - Number(p.montant || 0));
-      if (amountGap === 0) score += 45;
-      else if (amountGap <= 500) score += 30;
-      else if (amountGap <= 5000) score += 15;
-      const d1 = new Date(f.date_facture); const d2 = new Date(p.date_paiement);
-      const dayGap = Math.abs((d2 - d1) / (1000*60*60*24));
-      if (dayGap <= 2) score += 20; else if (dayGap <= 7) score += 10;
-      if ((p.reference_facture || '').includes(f.numero_facture)) score += 20;
-      return { f, score: Math.min(99, Math.round(score)) };
-    }).sort((a,b)=>b.score-a.score);
+
+    const candidates = (factures || []).filter(
+      (f) => detectStructure(f.structure) === detectStructure(p.structure)
+    );
+
+    const scored = candidates
+      .map((f) => {
+        let score = 25;
+        const amountGap = Math.abs(Number(f.total_ttc || 0) - Number(p.montant || 0));
+        if (amountGap === 0) score += 45;
+        else if (amountGap <= 500) score += 30;
+        else if (amountGap <= 5000) score += 15;
+
+        const d1 = new Date(f.date_facture);
+        const d2 = new Date(p.date_paiement);
+        const dayGap = Math.abs((d2 - d1) / (1000 * 60 * 60 * 24));
+        if (dayGap <= 2) score += 20;
+        else if (dayGap <= 7) score += 10;
+
+        if ((p.reference_facture || '').includes(f.numero_facture)) score += 20;
+
+        return { f, score: Math.min(99, Math.round(score)) };
+      })
+      .sort((a, b) => b.score - a.score);
+
     const best = scored[0];
-    return { paiement_id: p.id, transaction_id: p.transaction_id, structure: detectStructure(p.structure), montant_paiement: Number(p.montant || 0), date_paiement: p.date_paiement, facture_id: best?.score >= 45 ? best.f.id : null, numero_facture: best?.score >= 45 ? best.f.numero_facture : null, montant_facture: best?.score >= 45 ? Number(best.f.total_ttc || 0) : null, score: best?.score || 0, statut: best?.score >= 45 ? 'à valider' : 'non rapproché', suggestion: best?.score >= 45 ? 'Correspondance probable détectée' : 'Aucun rapprochement fiable' };
+    return {
+      paiement_id: p.id,
+      transaction_id: p.transaction_id,
+      structure: detectStructure(p.structure),
+      montant_paiement: Number(p.montant || 0),
+      date_paiement: p.date_paiement,
+      facture_id: best?.score >= 45 ? best.f.id : null,
+      numero_facture: best?.score >= 45 ? best.f.numero_facture : null,
+      montant_facture: best?.score >= 45 ? Number(best.f.total_ttc || 0) : null,
+      score: best?.score || 0,
+      statut: best?.score >= 45 ? 'à valider' : 'non rapproché',
+      suggestion: best?.score >= 45 ? 'Correspondance probable détectée' : 'Aucun rapprochement fiable',
+    };
   });
 }
 
 async function buildRistournes() {
   const [{ data: factures }, { data: ristournes }] = await Promise.all([
     supabase.from('factures').select('*').order('date_facture', { ascending: false }),
-    supabase.from('ristournes_paiements').select('*').order('date_paiement', { ascending: false })
+    supabase.from('ristournes_paiements').select('*').order('date_paiement', { ascending: false }),
   ]);
-  const byRef = new Map((ristournes || []).map(r => [r.reference_facture || '', r]));
-  return (factures || []).filter(f => Number(f.ristourne || 0) > 0).map((f) => {
-    const row = byRef.get(f.numero_facture) || null;
-    return {
-      id: row?.id || `facture-${f.id}`,
-      structure: detectStructure(f.structure),
-      reference_facture: f.numero_facture,
-      montant_theorique: Number(f.ristourne || 0),
-      montant_recu: Number(row?.montant_recu || 0),
-      date_paiement: row?.date_paiement || null,
-      mode_paiement: row?.mode_paiement || null,
-      commentaire: row?.commentaire || null,
-      statut: row ? (Number(row.montant_recu || 0) >= Number(f.ristourne || 0) ? 'payée' : 'partielle') : 'à recevoir'
-    };
-  });
+
+  const byRef = new Map((ristournes || []).map((r) => [r.reference_facture || '', r]));
+
+  return (factures || [])
+    .filter((f) => Number(f.ristourne || 0) > 0)
+    .map((f) => {
+      const row = byRef.get(f.numero_facture) || null;
+      return {
+        id: row?.id || `facture-${f.id}`,
+        structure: detectStructure(f.structure),
+        reference_facture: f.numero_facture,
+        montant_theorique: Number(f.ristourne || 0),
+        montant_recu: Number(row?.montant_recu || 0),
+        date_paiement: row?.date_paiement || null,
+        mode_paiement: row?.mode_paiement || null,
+        commentaire: row?.commentaire || null,
+        statut: row
+          ? Number(row.montant_recu || 0) >= Number(f.ristourne || 0)
+            ? 'payée'
+            : 'partielle'
+          : 'à recevoir',
+      };
+    });
 }
 
-app.get('/', (_, res) => res.json({ service: 'DZM Backend API', status: 'ok', health: '/health', message: 'Utilise /health pour vérifier le service et /api/* pour les routes métier.' }));
-app.get('/health', (_, res) => res.json({ status: 'ok', service: 'DZM Backend Final - Groq + Supabase + Cloudinary', timestamp: new Date().toISOString() }));
-app.get('/api/config/status', (_, res) => res.json({ supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY), groq: Boolean(process.env.GROQ_API_KEY), telegram: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID), gmail: Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD), cloudinary: Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET), backendUrl: process.env.BACKEND_PUBLIC_URL || null }));
+// =========================
+// ROUTES
+// =========================
+app.get('/', (_, res) =>
+  res.json({
+    service: 'DZM Backend API',
+    status: 'ok',
+    health: '/health',
+  })
+);
+
+app.get('/health', (_, res) =>
+  res.json({
+    status: 'ok',
+    service: 'DZM Backend Final - Groq + Supabase + Cloudinary + Telegram',
+    timestamp: new Date().toISOString(),
+  })
+);
+
+app.get('/api/config/status', (_, res) =>
+  res.json({
+    supabase: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY),
+    groq: Boolean(process.env.GROQ_API_KEY),
+    telegram: Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+    gmail: Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD),
+    cloudinary: Boolean(
+      process.env.CLOUDINARY_CLOUD_NAME &&
+        process.env.CLOUDINARY_API_KEY &&
+        process.env.CLOUDINARY_API_SECRET
+    ),
+    backendUrl: process.env.BACKEND_PUBLIC_URL || null,
+  })
+);
+
+app.get('/api/telegram/test', async (_, res) => {
+  try {
+    if (!bot) {
+      return res.status(400).json({
+        success: false,
+        error: 'Bot Telegram non configuré',
+      });
+    }
+
+    if (!TELEGRAM_CHAT_ID) {
+      return res.status(400).json({
+        success: false,
+        error: 'TELEGRAM_CHAT_ID manquant',
+      });
+    }
+
+    await bot.sendMessage(TELEGRAM_CHAT_ID, 'Test Telegram DZM : le bot fonctionne bien.');
+    return res.json({
+      success: true,
+      message: 'Message Telegram envoyé',
+    });
+  } catch (error) {
+    console.error('Telegram test error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur Telegram',
+    });
+  }
+});
+
 app.post('/api/files/upload', upload.single('image'), async (req, res) => {
   const uploadedFile = getUploadedFile(req);
   try {
@@ -312,96 +826,397 @@ app.post('/api/files/upload', upload.single('image'), async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-app.post('/api/ocr/facture', upload.fields([{ name: 'image', maxCount: 1 }, { name: 'file', maxCount: 1 }]), async (req, res) => {
-  const uploadedFile = getUploadedFile(req);
-  try {
-    if (!uploadedFile) return res.status(400).json({ error: 'Aucune image recue' });
-    const result = await analyseOCRFacture(uploadedFile.path, null);
-    cleanFile(uploadedFile);
-    res.json({ success: true, data: { ...result, warnings: buildInvoiceWarnings(normalizeFacturePayload(result)) } });
-  } catch (err) { cleanFile(uploadedFile); res.status(500).json({ success: false, error: err.message }); }
-});
-app.post('/api/ocr/paiement', upload.fields([{ name: 'image', maxCount: 1 }, { name: 'file', maxCount: 1 }]), async (req, res) => {
-  const uploadedFile = getUploadedFile(req);
-  try {
-    if (!uploadedFile) return res.status(400).json({ error: 'Aucune image recue' });
-    const result = await analyseOCRPaiement(uploadedFile.path, null);
-    cleanFile(uploadedFile);
-    res.json({ success: true, data: { ...result, warnings: buildPaymentWarnings(normalizePaiementPayload(result)) } });
-  } catch (err) { cleanFile(uploadedFile); res.status(500).json({ success: false, error: err.message }); }
-});
+
+app.post(
+  '/api/ocr/facture',
+  upload.fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const uploadedFile = getUploadedFile(req);
+    try {
+      if (!uploadedFile) return res.status(400).json({ error: 'Aucune image recue' });
+      const result = await analyseOCRFacture(uploadedFile.path, null);
+      cleanFile(uploadedFile);
+      res.json({
+        success: true,
+        data: { ...result, warnings: buildInvoiceWarnings(normalizeFacturePayload(result)) },
+      });
+    } catch (err) {
+      cleanFile(uploadedFile);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  }
+);
+
+app.post(
+  '/api/ocr/paiement',
+  upload.fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const uploadedFile = getUploadedFile(req);
+    try {
+      if (!uploadedFile) return res.status(400).json({ error: 'Aucune image recue' });
+      const result = await analyseOCRPaiement(uploadedFile.path, null);
+      cleanFile(uploadedFile);
+      res.json({
+        success: true,
+        data: { ...result, warnings: buildPaymentWarnings(normalizePaiementPayload(result)) },
+      });
+    } catch (err) {
+      cleanFile(uploadedFile);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  }
+);
+
 app.post('/api/assistant', async (req, res) => {
   try {
     const question = req.body.question || req.body.message;
     const historique = Array.isArray(req.body.historique) ? req.body.historique : [];
     if (!question) return res.status(400).json({ error: 'Question manquante' });
+
     const reponse = await assistantIA(question, historique, supabase, null);
     res.json({ success: true, reponse, response: reponse });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
-app.get('/api/factures', async (_, res) => { try { const { data, error } = await supabase.from('factures').select('*').order('date_facture', { ascending: false }); if (error) throw error; res.json(await hydrateFactures(data || [])); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/factures', async (req, res) => { try { res.json(await saveFactureWithLines({ ...req.body, source: req.body.source || 'manuel' })); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/factures/from-ocr', async (req, res) => { try { res.json(await saveFactureWithLines({ ...req.body, source: req.body.source || 'ocr' })); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.delete('/api/factures/:id', async (req, res) => { try { const { id } = req.params; await supabase.from('produits_facture').delete().eq('facture_id', id); const { error } = await supabase.from('factures').delete().eq('id', id); if (error) throw error; res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/paiements', async (_, res) => { try { const { data, error } = await supabase.from('paiements_mobile').select('*').order('date_paiement', { ascending: false }); if (error) throw error; res.json(data || []); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/paiements', async (req, res) => { try { res.json(await savePaiement(req.body)); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/paiements/from-ocr', async (req, res) => { try { res.json(await savePaiement({ ...req.body, source: 'ocr' })); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/produits/summary', async (_, res) => { try { const dashboard = await buildDashboard(); res.json(dashboard.topProducts); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/emballages', async (_, res) => { try { res.json(await buildEmballagesSummary()); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/emballages/manual', async (req, res) => { try { const payload = { structure: detectStructure(req.body.structure), reference_facture: req.body.reference_facture || null, emballages_pleins: 0, emballages_vides: Number(req.body.emballages_vides || 0), colis: 0, date_mouvement: normalizeDate(req.body.date_mouvement), source: req.body.source || 'manuel', note: req.body.note || null }; const { data, error } = await supabase.from('emballages_mouvements').insert(payload).select('*').single(); if (error) throw error; res.json(data); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/stats', async (_, res) => { try { const dashboard = await buildDashboard(); res.json({ totalFactures: dashboard.totalFactures, totalPaiements: dashboard.totalPaiements, montantFacture: dashboard.montantFacture, montantRecu: dashboard.montantRecu, resteAPayer: dashboard.resteAPayer, totalCasiers: dashboard.totalCasiers }); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/dashboard', async (_, res) => { try { res.json(await buildDashboard()); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-app.get('/api/rapprochements', async (_, res) => { try { res.json(await buildRapprochements()); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/rapprochements', async (req, res) => { try {
-  const payload = { paiement_id: req.body.paiement_id, facture_id: req.body.facture_id, montant_impute: Number(req.body.montant_impute || 0), score: Number(req.body.score || 100), source: req.body.source || 'manuel' };
-  const { data: existing } = await supabase.from('rapprochements_factures_paiements').select('id').eq('paiement_id', payload.paiement_id).maybeSingle();
-  let data;
-  if (existing?.id) {
-    const resp = await supabase.from('rapprochements_factures_paiements').update(payload).eq('id', existing.id).select('*').single(); if (resp.error) throw resp.error; data = resp.data;
-  } else {
-    const resp = await supabase.from('rapprochements_factures_paiements').insert(payload).select('*').single(); if (resp.error) throw resp.error; data = resp.data;
+app.get('/api/factures', async (_, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('factures')
+      .select('*')
+      .order('date_facture', { ascending: false });
+    if (error) throw error;
+    res.json(await hydrateFactures(data || []));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(data);
-} catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/ristournes', async (_, res) => { try { res.json(await buildRistournes()); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/ristournes/manual', async (req, res) => { try {
-  const password = req.body.password || '';
-  if (password !== 'DZM2026') return res.status(403).json({ error: 'Mot de passe invalide' });
-  const payload = { structure: detectStructure(req.body.structure), reference_facture: req.body.reference_facture || null, montant_theorique: Number(req.body.montant_theorique || 0), montant_recu: Number(req.body.montant_recu || 0), date_paiement: normalizeDate(req.body.date_paiement), mode_paiement: req.body.mode_paiement || null, commentaire: req.body.commentaire || null };
-  const { data: existing } = await supabase.from('ristournes_paiements').select('id').eq('reference_facture', payload.reference_facture).maybeSingle();
-  let data;
-  if (existing?.id) {
-    const resp = await supabase.from('ristournes_paiements').update(payload).eq('id', existing.id).select('*').single(); if (resp.error) throw resp.error; data = resp.data;
-  } else {
-    const resp = await supabase.from('ristournes_paiements').insert(payload).select('*').single(); if (resp.error) throw resp.error; data = resp.data;
+});
+
+app.post('/api/factures', async (req, res) => {
+  try {
+    res.json(await saveFactureWithLines({ ...req.body, source: req.body.source || 'manuel' }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(data);
-} catch (err) { res.status(500).json({ error: err.message }); } });
+});
+
+app.post('/api/factures/from-ocr', async (req, res) => {
+  try {
+    res.json(await saveFactureWithLines({ ...req.body, source: req.body.source || 'ocr' }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/factures/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await supabase.from('produits_facture').delete().eq('facture_id', id);
+    const { error } = await supabase.from('factures').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/paiements', async (_, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('paiements_mobile')
+      .select('*')
+      .order('date_paiement', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/paiements', async (req, res) => {
+  try {
+    res.json(await savePaiement(req.body));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/paiements/from-ocr', async (req, res) => {
+  try {
+    res.json(await savePaiement({ ...req.body, source: 'ocr' }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/produits/summary', async (_, res) => {
+  try {
+    const dashboard = await buildDashboard();
+    res.json(dashboard.topProducts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/emballages', async (_, res) => {
+  try {
+    res.json(await buildEmballagesSummary());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/emballages/manual', async (req, res) => {
+  try {
+    const payload = {
+      structure: detectStructure(req.body.structure),
+      reference_facture: req.body.reference_facture || null,
+      emballages_pleins: 0,
+      emballages_vides: Number(req.body.emballages_vides || 0),
+      colis: 0,
+      date_mouvement: normalizeDate(req.body.date_mouvement),
+      source: req.body.source || 'manuel',
+      note: req.body.note || null,
+    };
+    const { data, error } = await supabase
+      .from('emballages_mouvements')
+      .insert(payload)
+      .select('*')
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/stats', async (_, res) => {
+  try {
+    const dashboard = await buildDashboard();
+    res.json({
+      totalFactures: dashboard.totalFactures,
+      totalPaiements: dashboard.totalPaiements,
+      montantFacture: dashboard.montantFacture,
+      montantRecu: dashboard.montantRecu,
+      resteAPayer: dashboard.resteAPayer,
+      totalCasiers: dashboard.totalCasiers,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/dashboard', async (_, res) => {
+  try {
+    res.json(await buildDashboard());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/rapprochements', async (_, res) => {
+  try {
+    res.json(await buildRapprochements());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/rapprochements', async (req, res) => {
+  try {
+    const payload = {
+      paiement_id: req.body.paiement_id,
+      facture_id: req.body.facture_id,
+      montant_impute: Number(req.body.montant_impute || 0),
+      score: Number(req.body.score || 100),
+      source: req.body.source || 'manuel',
+    };
+
+    const { data: existing } = await supabase
+      .from('rapprochements_factures_paiements')
+      .select('id')
+      .eq('paiement_id', payload.paiement_id)
+      .maybeSingle();
+
+    let data;
+    if (existing?.id) {
+      const resp = await supabase
+        .from('rapprochements_factures_paiements')
+        .update(payload)
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (resp.error) throw resp.error;
+      data = resp.data;
+    } else {
+      const resp = await supabase
+        .from('rapprochements_factures_paiements')
+        .insert(payload)
+        .select('*')
+        .single();
+      if (resp.error) throw resp.error;
+      data = resp.data;
+    }
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/ristournes', async (_, res) => {
+  try {
+    res.json(await buildRistournes());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/ristournes/manual', async (req, res) => {
+  try {
+    const password = req.body.password || '';
+    if (password !== 'DZM2026') {
+      return res.status(403).json({ error: 'Mot de passe invalide' });
+    }
+
+    const payload = {
+      structure: detectStructure(req.body.structure),
+      reference_facture: req.body.reference_facture || null,
+      montant_theorique: Number(req.body.montant_theorique || 0),
+      montant_recu: Number(req.body.montant_recu || 0),
+      date_paiement: normalizeDate(req.body.date_paiement),
+      mode_paiement: req.body.mode_paiement || null,
+      commentaire: req.body.commentaire || null,
+    };
+
+    const { data: existing } = await supabase
+      .from('ristournes_paiements')
+      .select('id')
+      .eq('reference_facture', payload.reference_facture)
+      .maybeSingle();
+
+    let data;
+    if (existing?.id) {
+      const resp = await supabase
+        .from('ristournes_paiements')
+        .update(payload)
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (resp.error) throw resp.error;
+      data = resp.data;
+    } else {
+      const resp = await supabase
+        .from('ristournes_paiements')
+        .insert(payload)
+        .select('*')
+        .single();
+      if (resp.error) throw resp.error;
+      data = resp.data;
+    }
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/api/export/:table', async (req, res) => {
-  try { const { table } = req.params; const tables = ['factures', 'produits_facture', 'paiements_mobile']; if (!tables.includes(table)) return res.status(400).json({ error: 'Table invalide' }); const { data, error } = await supabase.from(table).select('*'); if (error) throw error; const buffer = await generateExcel(table, data || []); res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); res.setHeader('Content-Disposition', `attachment; filename=DZM_${table}_${new Date().toISOString().split('T')[0]}.xlsx`); res.send(buffer); } catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const { table } = req.params;
+    const tables = ['factures', 'produits_facture', 'paiements_mobile'];
+    if (!tables.includes(table)) return res.status(400).json({ error: 'Table invalide' });
+
+    const { data, error } = await supabase.from(table).select('*');
+    if (error) throw error;
+
+    const buffer = await generateExcel(table, data || []);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=DZM_${table}_${new Date().toISOString().split('T')[0]}.xlsx`
+    );
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
 app.post('/api/export/email', async (req, res) => {
   try {
-    const { email } = req.body; if (!email) return res.status(400).json({ error: 'Email manquant' });
-    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) return res.status(500).json({ error: 'Gmail non configure' });
-    const [{ data: factures }, { data: paiements }, { data: produits }] = await Promise.all([supabase.from('factures').select('*'), supabase.from('paiements_mobile').select('*'), supabase.from('produits_facture').select('*')]);
-    const transporter = nodemailer.createTransport(process.env.SMTP_HOST ? {
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: String(process.env.SMTP_SECURE || 'false') === 'true',
-      auth: { user: process.env.SMTP_USER || process.env.GMAIL_USER, pass: process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD }
-    } : {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email manquant' });
+    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+      return res.status(500).json({ error: 'Gmail non configure' });
+    }
+
+    const [{ data: factures }, { data: paiements }, { data: produits }] = await Promise.all([
+      supabase.from('factures').select('*'),
+      supabase.from('paiements_mobile').select('*'),
+      supabase.from('produits_facture').select('*'),
+    ]);
+
+    const transporter = nodemailer.createTransport({
       service: 'gmail',
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD }
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_APP_PASSWORD,
+      },
     });
-    await transporter.verify();
-    await transporter.sendMail({ from: `"DZM Financial Cockpit" <${process.env.SMTP_USER || process.env.GMAIL_USER}>`, to: email, subject: `Export DZM - ${new Date().toLocaleDateString('fr-FR')}`, html: '<div style="font-family:Arial,sans-serif;background:#091120;color:#f4f7fb;padding:24px;border-radius:16px"><h2 style="margin-top:0">Export DZM</h2><p>Bonjour,</p><p>Vous trouverez en pièces jointes les exports Factures, Paiements et Produits générés depuis <strong>DZM Financial Cockpit</strong>.</p><p style="opacity:.8">Structures suivies : DZM A / DZM B • Fournisseur surveillé : DT AZIMUTS</p></div>', attachments: [{ filename: 'DZM_Factures.xlsx', content: await generateExcel('factures', factures || []) }, { filename: 'DZM_Paiements.xlsx', content: await generateExcel('paiements_mobile', paiements || []) }, { filename: 'DZM_Produits.xlsx', content: await generateExcel('produits_facture', produits || []) }] });
+
+    await transporter.sendMail({
+      from: `"DZM Financial Cockpit" <${process.env.GMAIL_USER}>`,
+      to: email,
+      subject: `Export DZM - ${new Date().toLocaleDateString('fr-FR')}`,
+      html: '<h2>Export DZM</h2><p>Les fichiers factures, paiements et produits sont en pièces jointes.</p>',
+      attachments: [
+        { filename: 'DZM_Factures.xlsx', content: await generateExcel('factures', factures || []) },
+        {
+          filename: 'DZM_Paiements.xlsx',
+          content: await generateExcel('paiements_mobile', paiements || []),
+        },
+        {
+          filename: 'DZM_Produits.xlsx',
+          content: await generateExcel('produits_facture', produits || []),
+        },
+      ],
+    });
+
     res.json({ success: true, message: `Export envoye a ${email}` });
-  } catch (err) { res.status(500).json({ error: `Envoi email impossible: ${err.message}` }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
-app.post('/api/telegram/rapport', async (_, res) => { try { if (!bot) return res.status(500).json({ error: 'Telegram non configure' }); await envoyerAlerteQuotidienne(bot, supabase, null); res.json({ success: true, message: 'Rapport envoye' }); } catch (err) { res.status(500).json({ error: err.message }); } });
-if (bot) { require('./services/telegram')(bot, supabase, null); cron.schedule('0 8 * * *', async () => { await envoyerAlerteQuotidienne(bot, supabase, null); }, { timezone: 'Africa/Douala' }); }
+
+app.post('/api/telegram/rapport', async (_, res) => {
+  try {
+    if (!bot) return res.status(500).json({ error: 'Telegram non configure' });
+    await envoyerAlerteQuotidienne(bot, supabase, null);
+    res.json({ success: true, message: 'Rapport envoye' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+if (bot) {
+  require('./services/telegram')(bot, supabase, null);
+
+  cron.schedule(
+    '0 8 * * *',
+    async () => {
+      await envoyerAlerteQuotidienne(bot, supabase, null);
+    },
+    { timezone: 'Africa/Douala' }
+  );
+}
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`✅ DZM Backend Final - http://localhost:${PORT}`));
