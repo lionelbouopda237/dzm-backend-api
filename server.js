@@ -13,339 +13,77 @@ const cron = require('node-cron');
 const fs = require('fs');
 const axios = require('axios');
 const FormData = require('form-data');
+const crypto = require('crypto');
 
 const app = express();
 const upload = multer({ dest: '/tmp/uploads/', limits: { fileSize: 12 * 1024 * 1024 } });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-// =========================
-// TELEGRAM
-// =========================
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-
-const bot = TELEGRAM_TOKEN
-  ? new TelegramBot(TELEGRAM_TOKEN, {
-      polling: {
-        autoStart: true,
-        interval: 1000,
-        params: {
-          timeout: 10,
-        },
-      },
-    })
-  : null;
-
-if (bot) {
-  bot
-    .deleteWebHook()
-    .then(() => console.log('Telegram webhook removed, polling enabled'))
-    .catch((err) => console.error('Telegram deleteWebHook error:', err?.message || err));
-
-  console.log('Telegram bot polling started');
-
-  bot.onText(/\/start/, async (msg) => {
-    await bot.sendMessage(
-      msg.chat.id,
-      [
-        'Bienvenue sur le bot DZM.',
-        '',
-        'Commandes disponibles :',
-        '/help',
-        '/status',
-        '/brief',
-        '/bilan',
-        '/alertes',
-        '/emballages',
-        '/compare',
-        '/factures',
-        '/paiements',
-        '/ia <question>',
-      ].join('\n')
-    );
-  });
-
-  bot.onText(/\/help/, async (msg) => {
-    await bot.sendMessage(
-      msg.chat.id,
-      [
-        'Commandes disponibles :',
-        '',
-        '/start',
-        '/help',
-        '/status',
-        '/brief',
-        '/bilan',
-        '/alertes',
-        '/emballages',
-        '/compare',
-        '/factures',
-        '/paiements',
-        '/ia <question>',
-      ].join('\n')
-    );
-  });
-
-  bot.onText(/\/status/, async (msg) => {
-    try {
-      const dashboard = await buildDashboard();
-      await bot.sendMessage(
-        msg.chat.id,
-        [
-          '📊 État rapide DZM',
-          `Factures : ${dashboard.totalFactures}`,
-          `Paiements : ${dashboard.totalPaiements}`,
-          `Montant facturé : ${Number(dashboard.montantFacture || 0).toLocaleString('fr-FR')} FCFA`,
-          `Montant encaissé : ${Number(dashboard.montantRecu || 0).toLocaleString('fr-FR')} FCFA`,
-          `Reste à payer : ${Number(dashboard.resteAPayer || 0).toLocaleString('fr-FR')} FCFA`,
-        ].join('\n')
-      );
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur status : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/brief/, async (msg) => {
-    try {
-      const dashboard = await buildDashboard();
-      const emballages = await buildEmballagesSummary();
-      await bot.sendMessage(
-        msg.chat.id,
-        [
-          '🌅 Brief DZM',
-          `Factures : ${dashboard.totalFactures}`,
-          `Paiements : ${dashboard.totalPaiements}`,
-          `Montant encaissé : ${Number(dashboard.montantRecu || 0).toLocaleString('fr-FR')} FCFA`,
-          `Solde emballages global : ${Number(emballages.synthese?.solde || 0).toLocaleString('fr-FR')}`,
-          `Anomalies factures : ${dashboard.facturesAnomalie}`,
-        ].join('\n')
-      );
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur brief : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/bilan/, async (msg) => {
-    try {
-      const dashboard = await buildDashboard();
-      await bot.sendMessage(
-        msg.chat.id,
-        [
-          '🌙 Bilan DZM',
-          `Factures enregistrées : ${dashboard.totalFactures}`,
-          `Paiements enregistrés : ${dashboard.totalPaiements}`,
-          `Reste à payer : ${Number(dashboard.resteAPayer || 0).toLocaleString('fr-FR')} FCFA`,
-          `Factures en attente : ${dashboard.facturesEnAttente}`,
-          `Factures en anomalie : ${dashboard.facturesAnomalie}`,
-        ].join('\n')
-      );
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur bilan : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/alertes/, async (msg) => {
-    try {
-      const dashboard = await buildDashboard();
-      const lines = [
-        '🚨 Alertes DZM',
-        `Factures en anomalie : ${dashboard.facturesAnomalie}`,
-        `Factures en attente : ${dashboard.facturesEnAttente}`,
-      ];
-      if (dashboard.resteAPayer > 0) {
-        lines.push(`Reste à payer : ${Number(dashboard.resteAPayer).toLocaleString('fr-FR')} FCFA`);
-      }
-      await bot.sendMessage(msg.chat.id, lines.join('\n'));
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur alertes : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/emballages/, async (msg) => {
-    try {
-      const data = await buildEmballagesSummary();
-      const lines = ['📦 Gestion emballages vides'];
-      for (const row of data.summary || []) {
-        lines.push(
-          `${row.structure} — reçus: ${row.emballagesRecus}, renvoyés: ${row.emballagesRenvoyes}, solde: ${row.solde}, colis: ${row.colis}`
-        );
-      }
-      lines.push(
-        `Synthèse — reçus: ${data.synthese.emballagesRecus}, renvoyés: ${data.synthese.emballagesRenvoyes}, solde: ${data.synthese.solde}, colis: ${data.synthese.colis}`
-      );
-      await bot.sendMessage(msg.chat.id, lines.join('\n'));
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur emballages : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/compare/, async (msg) => {
-    try {
-      const dashboard = await buildDashboard();
-      const dzmA = dashboard.pieData?.find((x) => x.name === 'DZM A')?.value || 0;
-      const dzmB = dashboard.pieData?.find((x) => x.name === 'DZM B')?.value || 0;
-      await bot.sendMessage(
-        msg.chat.id,
-        [
-          '⚖️ Comparatif DZM A vs DZM B',
-          `DZM A : ${Number(dzmA).toLocaleString('fr-FR')} FCFA`,
-          `DZM B : ${Number(dzmB).toLocaleString('fr-FR')} FCFA`,
-        ].join('\n')
-      );
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur compare : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/factures/, async (msg) => {
-    try {
-      const { data, error } = await supabase
-        .from('factures')
-        .select('*')
-        .order('date_facture', { ascending: false })
-        .limit(5);
-      if (error) throw error;
-
-      const lines = ['🧾 Dernières factures'];
-      for (const f of data || []) {
-        lines.push(
-          `${f.numero_facture} — ${detectStructure(f.structure)} — ${Number(f.total_ttc || 0).toLocaleString('fr-FR')} FCFA`
-        );
-      }
-      await bot.sendMessage(msg.chat.id, lines.join('\n'));
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur factures : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/paiements/, async (msg) => {
-    try {
-      const { data, error } = await supabase
-        .from('paiements_mobile')
-        .select('*')
-        .order('date_paiement', { ascending: false })
-        .limit(5);
-      if (error) throw error;
-
-      const lines = ['💳 Derniers paiements'];
-      for (const p of data || []) {
-        lines.push(
-          `${p.transaction_id} — ${detectStructure(p.structure)} — ${Number(p.montant || 0).toLocaleString('fr-FR')} FCFA`
-        );
-      }
-      await bot.sendMessage(msg.chat.id, lines.join('\n'));
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur paiements : ${error.message}`);
-    }
-  });
-
-  bot.onText(/\/ia (.+)/, async (msg, match) => {
-    try {
-      const question = match?.[1]?.trim();
-      if (!question) {
-        await bot.sendMessage(msg.chat.id, 'Pose une question après /ia');
-        return;
-      }
-
-      const reponse = await assistantIA(question, [], supabase, null);
-      await bot.sendMessage(
-        msg.chat.id,
-        `Reformulation : tu veux que j’analyse la question suivante.\n\nQuestion : ${question}\n\n${reponse}`
-      );
-    } catch (error) {
-      await bot.sendMessage(msg.chat.id, `Erreur IA : ${error.message}`);
-    }
-  });
-
-  bot.on('polling_error', (error) => {
-    console.error('Telegram polling error:', error?.message || error);
-  });
-
-  bot.on('message', (msg) => {
-    console.log('Telegram message received from chat:', msg.chat.id);
-  });
-} else {
-  console.log('Telegram bot disabled: missing TELEGRAM_BOT_TOKEN');
-}
-
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '20mb' }));
 
+// =========================
+// HELPERS
+// =========================
 function getUploadedFile(req) {
   if (req.file) return req.file;
   if (req.files?.image?.[0]) return req.files.image[0];
   if (req.files?.file?.[0]) return req.files.file[0];
   return null;
 }
+
 function cleanFile(file) {
   if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
 }
+
 function normalizeDate(value) {
   if (!value) return new Date().toISOString().slice(0, 10);
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
   return date.toISOString().slice(0, 10);
 }
+
 function detectStructure(input) {
   const v = String(input || '').toUpperCase();
   if (v.includes('DZM B')) return 'DZM B';
   return 'DZM A';
 }
 
+function money(n) {
+  return `${new Intl.NumberFormat('fr-FR').format(Number(n || 0))} FCFA`;
+}
+
+function getMainMenu() {
+  return {
+    reply_markup: {
+      keyboard: [
+        ['📊 Statut', '🌅 Brief du matin'],
+        ['🌙 Bilan du soir', '🚨 Alertes'],
+        ['🧾 Factures', '💳 Paiements'],
+        ['📦 Emballages', '🔄 Rapprochements'],
+        ['🎁 Ristournes', '⚖️ Comparer A/B'],
+        ['🤖 Assistant IA', '📤 Exports'],
+        ['ℹ️ Aide'],
+      ],
+      resize_keyboard: true,
+      persistent: true,
+    },
+  };
+}
+
 function isPackagingProduct(name) {
   const v = String(name || '').toLowerCase();
   return ['emballage', 'casier', 'casiers', 'colis'].some((k) => v.includes(k));
 }
-async function buildEmballagesSummary() {
-  const [{ data: factures }, { data: mouvements }, { data: lignes }] = await Promise.all([
-    supabase.from('factures').select('*').order('date_facture', { ascending: false }),
-    supabase.from('emballages_mouvements').select('*').order('date_mouvement', { ascending: false }),
-    supabase.from('produits_facture').select('facture_id, produit, quantite'),
-  ]);
-  const byFacture = new Map();
-  for (const row of lignes || []) {
-    const key = row.facture_id;
-    if (!byFacture.has(key)) byFacture.set(key, []);
-    byFacture.get(key).push(row);
-  }
-  const base = new Map();
-  for (const structure of ['DZM A', 'DZM B']) {
-    base.set(structure, { structure, emballagesRecus: 0, emballagesRenvoyes: 0, solde: 0, colis: 0 });
-  }
-  for (const row of factures || []) {
-    const target = base.get(detectStructure(row.structure));
-    target.emballagesRecus += Number(row.nombre_casiers || 0);
-    const rows = byFacture.get(row.id) || [];
-    target.colis += rows
-      .filter((item) => String(item.produit || '').toLowerCase().includes('colis'))
-      .reduce((s, item) => s + Number(item.quantite || 0), 0);
-  }
-  for (const row of mouvements || []) {
-    const target = base.get(detectStructure(row.structure));
-    target.emballagesRenvoyes += Number(row.emballages_vides || 0);
-  }
-  const summary = Array.from(base.values()).map((item) => ({
-    ...item,
-    solde: item.emballagesRecus - item.emballagesRenvoyes,
-  }));
-  const synthese = summary.reduce(
-    (acc, row) => {
-      acc.emballagesRecus += row.emballagesRecus;
-      acc.emballagesRenvoyes += row.emballagesRenvoyes;
-      acc.solde += row.solde;
-      acc.colis += row.colis;
-      return acc;
-    },
-    { emballagesRecus: 0, emballagesRenvoyes: 0, solde: 0, colis: 0 }
-  );
-  return { summary, mouvements: mouvements || [], synthese };
-}
+
 function buildInvoiceWarnings(payload) {
   const warnings = [];
   const sumLines = (payload.produits || []).reduce((s, l) => s + Number(l.total || 0), 0);
+
   if (payload.total_ht && Math.abs(Number(payload.total_ht) - sumLines) > 5) {
     warnings.push('Le total HT ne correspond pas exactement à la somme des lignes.');
   }
+
   if (
     payload.total_ttc &&
     payload.total_ht &&
@@ -357,50 +95,17 @@ function buildInvoiceWarnings(payload) {
   ) {
     warnings.push('Le total TTC paraît incohérent avec HT, TVA et ristourne.');
   }
+
   if (!payload.client) warnings.push('Le client/structure commanditaire est vide.');
   return warnings;
 }
+
 function buildPaymentWarnings(payload) {
   const warnings = [];
   if (!payload.transaction_id) warnings.push('Transaction ID manquant.');
   if (!payload.reference_facture) warnings.push('Paiement non rapproché à une facture.');
   if (!payload.montant || Number(payload.montant) <= 0) warnings.push('Montant paiement invalide.');
   return warnings;
-}
-async function uploadToCloudinary(filePath, folder) {
-  if (
-    !process.env.CLOUDINARY_CLOUD_NAME ||
-    !process.env.CLOUDINARY_API_KEY ||
-    !process.env.CLOUDINARY_API_SECRET
-  ) {
-    return null;
-  }
-  const form = new FormData();
-  form.append('file', fs.createReadStream(filePath));
-  if (process.env.CLOUDINARY_UPLOAD_PRESET) {
-    form.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET);
-  }
-  form.append('folder', folder);
-  const timestamp = Math.round(Date.now() / 1000);
-  const crypto = require('crypto');
-  const paramsToSign = `folder=${folder}&timestamp=${timestamp}${
-    process.env.CLOUDINARY_UPLOAD_PRESET ? `&upload_preset=${process.env.CLOUDINARY_UPLOAD_PRESET}` : ''
-  }${process.env.CLOUDINARY_TRANSFORMATION ? `&transformation=${process.env.CLOUDINARY_TRANSFORMATION}` : ''}${
-    process.env.CLOUDINARY_API_SECRET
-  }`;
-  const signature = crypto.createHash('sha1').update(paramsToSign).digest('hex');
-  form.append('api_key', process.env.CLOUDINARY_API_KEY);
-  form.append('timestamp', String(timestamp));
-  form.append('signature', signature);
-  if (process.env.CLOUDINARY_TRANSFORMATION) {
-    form.append('transformation', process.env.CLOUDINARY_TRANSFORMATION);
-  }
-  const url = `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`;
-  const response = await axios.post(url, form, {
-    headers: form.getHeaders(),
-    maxBodyLength: Infinity,
-  });
-  return { url: response.data.secure_url, public_id: response.data.public_id };
 }
 
 function normalizeFacturePayload(body) {
@@ -431,6 +136,7 @@ function normalizeFacturePayload(body) {
       .filter((line) => line.produit),
   };
 }
+
 function normalizePaiementPayload(body) {
   return {
     transaction_id: String(body.transaction_id || '').trim(),
@@ -445,24 +151,79 @@ function normalizePaiementPayload(body) {
     image_public_id: body.image_public_id || null,
   };
 }
+
+async function uploadToCloudinary(filePath, folder) {
+  if (
+    !process.env.CLOUDINARY_CLOUD_NAME ||
+    !process.env.CLOUDINARY_API_KEY ||
+    !process.env.CLOUDINARY_API_SECRET
+  ) {
+    return null;
+  }
+
+  const form = new FormData();
+  form.append('file', fs.createReadStream(filePath));
+
+  if (process.env.CLOUDINARY_UPLOAD_PRESET) {
+    form.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET);
+  }
+
+  form.append('folder', folder);
+
+  const timestamp = Math.round(Date.now() / 1000);
+  const paramsToSign = `folder=${folder}&timestamp=${timestamp}${
+    process.env.CLOUDINARY_UPLOAD_PRESET ? `&upload_preset=${process.env.CLOUDINARY_UPLOAD_PRESET}` : ''
+  }${process.env.CLOUDINARY_TRANSFORMATION ? `&transformation=${process.env.CLOUDINARY_TRANSFORMATION}` : ''}${
+    process.env.CLOUDINARY_API_SECRET
+  }`;
+  const signature = crypto.createHash('sha1').update(paramsToSign).digest('hex');
+
+  form.append('api_key', process.env.CLOUDINARY_API_KEY);
+  form.append('timestamp', String(timestamp));
+  form.append('signature', signature);
+
+  if (process.env.CLOUDINARY_TRANSFORMATION) {
+    form.append('transformation', process.env.CLOUDINARY_TRANSFORMATION);
+  }
+
+  const url = `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`;
+  const response = await axios.post(url, form, {
+    headers: form.getHeaders(),
+    maxBodyLength: Infinity,
+  });
+
+  return { url: response.data.secure_url, public_id: response.data.public_id };
+}
+
 async function hydrateFactures(rows) {
   if (!rows?.length) return [];
   const ids = rows.map((row) => row.id);
-  const { data: produits, error } = await supabase.from('produits_facture').select('*').in('facture_id', ids);
+
+  const { data: produits, error } = await supabase
+    .from('produits_facture')
+    .select('*')
+    .in('facture_id', ids);
+
   if (error) throw error;
+
   const map = new Map();
   for (const produit of produits || []) {
     if (!map.has(produit.facture_id)) map.set(produit.facture_id, []);
     map.get(produit.facture_id).push(produit);
   }
+
   return rows.map((row) => ({ ...row, produits: map.get(row.id) || [] }));
 }
+
 async function saveFactureWithLines(payload) {
   const normalized = normalizeFacturePayload(payload);
+
   if (!normalized.numero_facture || !normalized.client) {
     throw new Error('Numero de facture et client requis');
   }
+
   const overwrite = Boolean(payload.overwrite);
+
   const { data: existing } = await supabase
     .from('factures')
     .select('id')
@@ -476,6 +237,7 @@ async function saveFactureWithLines(payload) {
 
   const { produits, ...facture } = normalized;
   let inserted;
+
   if (existing?.id && overwrite) {
     const { data, error } = await supabase
       .from('factures')
@@ -485,9 +247,14 @@ async function saveFactureWithLines(payload) {
       .single();
     if (error) throw error;
     inserted = data;
+
     await supabase.from('produits_facture').delete().eq('facture_id', existing.id);
   } else {
-    const { data, error } = await supabase.from('factures').insert(facture).select('*').single();
+    const { data, error } = await supabase
+      .from('factures')
+      .insert(facture)
+      .select('*')
+      .single();
     if (error) throw error;
     inserted = data;
   }
@@ -501,11 +268,14 @@ async function saveFactureWithLines(payload) {
   const [hydrated] = await hydrateFactures([inserted]);
   return { ...hydrated, warnings: buildInvoiceWarnings(normalized) };
 }
+
 async function savePaiement(payload) {
   const normalized = normalizePaiementPayload(payload);
+
   if (!normalized.transaction_id) throw new Error('Transaction ID requis');
 
   const overwrite = Boolean(payload.overwrite);
+
   const { data: existing } = await supabase
     .from('paiements_mobile')
     .select('id')
@@ -518,6 +288,7 @@ async function savePaiement(payload) {
   }
 
   let data;
+
   if (existing?.id && overwrite) {
     const resp = await supabase
       .from('paiements_mobile')
@@ -528,13 +299,77 @@ async function savePaiement(payload) {
     if (resp.error) throw resp.error;
     data = resp.data;
   } else {
-    const resp = await supabase.from('paiements_mobile').insert(normalized).select('*').single();
+    const resp = await supabase
+      .from('paiements_mobile')
+      .insert(normalized)
+      .select('*')
+      .single();
     if (resp.error) throw resp.error;
     data = resp.data;
   }
 
   return { ...data, warnings: buildPaymentWarnings(normalized) };
 }
+
+async function buildEmballagesSummary() {
+  const [{ data: factures }, { data: mouvements }, { data: lignes }] = await Promise.all([
+    supabase.from('factures').select('*').order('date_facture', { ascending: false }),
+    supabase.from('emballages_mouvements').select('*').order('date_mouvement', { ascending: false }),
+    supabase.from('produits_facture').select('facture_id, produit, quantite'),
+  ]);
+
+  const byFacture = new Map();
+  for (const row of lignes || []) {
+    const key = row.facture_id;
+    if (!byFacture.has(key)) byFacture.set(key, []);
+    byFacture.get(key).push(row);
+  }
+
+  const base = new Map();
+  for (const structure of ['DZM A', 'DZM B']) {
+    base.set(structure, {
+      structure,
+      emballagesRecus: 0,
+      emballagesRenvoyes: 0,
+      solde: 0,
+      colis: 0,
+    });
+  }
+
+  for (const row of factures || []) {
+    const target = base.get(detectStructure(row.structure));
+    target.emballagesRecus += Number(row.nombre_casiers || 0);
+
+    const rows = byFacture.get(row.id) || [];
+    target.colis += rows
+      .filter((item) => String(item.produit || '').toLowerCase().includes('colis'))
+      .reduce((s, item) => s + Number(item.quantite || 0), 0);
+  }
+
+  for (const row of mouvements || []) {
+    const target = base.get(detectStructure(row.structure));
+    target.emballagesRenvoyes += Number(row.emballages_vides || 0);
+  }
+
+  const summary = Array.from(base.values()).map((item) => ({
+    ...item,
+    solde: item.emballagesRecus - item.emballagesRenvoyes,
+  }));
+
+  const synthese = summary.reduce(
+    (acc, row) => {
+      acc.emballagesRecus += row.emballagesRecus;
+      acc.emballagesRenvoyes += row.emballagesRenvoyes;
+      acc.solde += row.solde;
+      acc.colis += row.colis;
+      return acc;
+    },
+    { emballagesRecus: 0, emballagesRenvoyes: 0, solde: 0, colis: 0 }
+  );
+
+  return { summary, mouvements: mouvements || [], synthese };
+}
+
 async function buildDashboard() {
   const [{ data: factures }, { data: paiements }] = await Promise.all([
     supabase.from('factures').select('*').order('date_facture', { ascending: false }),
@@ -651,7 +486,10 @@ async function buildRapprochements() {
   const [{ data: paiements }, { data: factures }, { data: links }] = await Promise.all([
     supabase.from('paiements_mobile').select('*').order('date_paiement', { ascending: false }),
     supabase.from('factures').select('*').order('date_facture', { ascending: false }),
-    supabase.from('rapprochements_factures_paiements').select('*').order('created_at', { ascending: false }),
+    supabase
+      .from('rapprochements_factures_paiements')
+      .select('*')
+      .order('created_at', { ascending: false }),
   ]);
 
   const facturesById = new Map((factures || []).map((f) => [f.id, f]));
@@ -684,6 +522,7 @@ async function buildRapprochements() {
     const scored = candidates
       .map((f) => {
         let score = 25;
+
         const amountGap = Math.abs(Number(f.total_ttc || 0) - Number(p.montant || 0));
         if (amountGap === 0) score += 45;
         else if (amountGap <= 500) score += 30;
@@ -702,6 +541,7 @@ async function buildRapprochements() {
       .sort((a, b) => b.score - a.score);
 
     const best = scored[0];
+
     return {
       paiement_id: p.id,
       transaction_id: p.transaction_id,
@@ -746,6 +586,315 @@ async function buildRistournes() {
           : 'à recevoir',
       };
     });
+}
+
+// =========================
+// TELEGRAM
+// =========================
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
+const bot = TELEGRAM_TOKEN
+  ? new TelegramBot(TELEGRAM_TOKEN, {
+      polling: {
+        autoStart: true,
+        interval: 1000,
+        params: {
+          timeout: 10,
+        },
+      },
+    })
+  : null;
+
+if (bot) {
+  bot
+    .deleteWebHook()
+    .then(() => console.log('Telegram webhook removed, polling enabled'))
+    .catch((err) => console.error('Telegram deleteWebHook error:', err?.message || err));
+
+  console.log('Telegram bot polling started');
+
+  bot.onText(/\/start/, async (msg) => {
+    await bot.sendMessage(
+      msg.chat.id,
+      'Bienvenue sur le bot DZM.\nChoisis une fonction dans le menu ci-dessous.',
+      getMainMenu()
+    );
+  });
+
+  bot.onText(/\/help/, async (msg) => {
+    await bot.sendMessage(
+      msg.chat.id,
+      'Utilise les boutons pour naviguer rapidement dans les fonctions DZM.',
+      getMainMenu()
+    );
+  });
+
+  bot.onText(/\/status/, async (msg) => {
+    try {
+      const dashboard = await buildDashboard();
+      await bot.sendMessage(
+        msg.chat.id,
+        [
+          '📊 État rapide DZM',
+          `Factures : ${dashboard.totalFactures}`,
+          `Paiements : ${dashboard.totalPaiements}`,
+          `Montant facturé : ${money(dashboard.montantFacture)}`,
+          `Montant encaissé : ${money(dashboard.montantRecu)}`,
+          `Reste à payer : ${money(dashboard.resteAPayer)}`,
+        ].join('\n'),
+        getMainMenu()
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur status : ${error.message}`, getMainMenu());
+    }
+  });
+
+  bot.onText(/\/brief/, async (msg) => {
+    try {
+      const reponse = await assistantIA(
+        'Prépare un brief du matin synthétique pour DZM A et DZM B.',
+        [],
+        supabase,
+        null
+      );
+      await bot.sendMessage(msg.chat.id, reponse, getMainMenu());
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur brief : ${error.message}`, getMainMenu());
+    }
+  });
+
+  bot.onText(/\/bilan/, async (msg) => {
+    try {
+      const reponse = await assistantIA(
+        'Prépare un bilan du soir synthétique pour DZM A et DZM B.',
+        [],
+        supabase,
+        null
+      );
+      await bot.sendMessage(msg.chat.id, reponse, getMainMenu());
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur bilan : ${error.message}`, getMainMenu());
+    }
+  });
+
+  bot.onText(/\/alertes/, async (msg) => {
+    try {
+      const reponse = await assistantIA(
+        'Résume les alertes, anomalies et paiements en attente.',
+        [],
+        supabase,
+        null
+      );
+      await bot.sendMessage(msg.chat.id, reponse, getMainMenu());
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur alertes : ${error.message}`, getMainMenu());
+    }
+  });
+
+  bot.onText(/\/ia (.+)/, async (msg, match) => {
+    try {
+      const question = match?.[1]?.trim();
+      if (!question) {
+        await bot.sendMessage(msg.chat.id, 'Pose une question après /ia', getMainMenu());
+        return;
+      }
+
+      const reponse = await assistantIA(question, [], supabase, null);
+      await bot.sendMessage(
+        msg.chat.id,
+        `Reformulation : tu veux que j’analyse la question suivante.\n\nQuestion : ${question}\n\n${reponse}`,
+        getMainMenu()
+      );
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Erreur IA : ${error.message}`, getMainMenu());
+    }
+  });
+
+  bot.on('message', async (msg) => {
+    const text = msg.text;
+    if (!text) return;
+    if (text.startsWith('/')) return;
+
+    try {
+      if (text === '📊 Statut') {
+        const dashboard = await buildDashboard();
+        return bot.sendMessage(
+          msg.chat.id,
+          [
+            '📊 État rapide DZM',
+            `Factures : ${dashboard.totalFactures}`,
+            `Paiements : ${dashboard.totalPaiements}`,
+            `Montant facturé : ${money(dashboard.montantFacture)}`,
+            `Montant encaissé : ${money(dashboard.montantRecu)}`,
+            `Reste à payer : ${money(dashboard.resteAPayer)}`,
+          ].join('\n'),
+          getMainMenu()
+        );
+      }
+
+      if (text === '🌅 Brief du matin') {
+        const reponse = await assistantIA(
+          'Prépare un brief du matin synthétique pour DZM A et DZM B.',
+          [],
+          supabase,
+          null
+        );
+        return bot.sendMessage(msg.chat.id, reponse, getMainMenu());
+      }
+
+      if (text === '🌙 Bilan du soir') {
+        const reponse = await assistantIA(
+          'Prépare un bilan du soir synthétique pour DZM A et DZM B.',
+          [],
+          supabase,
+          null
+        );
+        return bot.sendMessage(msg.chat.id, reponse, getMainMenu());
+      }
+
+      if (text === '🚨 Alertes') {
+        const reponse = await assistantIA(
+          'Résume les alertes, anomalies et paiements en attente.',
+          [],
+          supabase,
+          null
+        );
+        return bot.sendMessage(msg.chat.id, reponse, getMainMenu());
+      }
+
+      if (text === '🧾 Factures') {
+        const { data, error } = await supabase
+          .from('factures')
+          .select('*')
+          .order('date_facture', { ascending: false })
+          .limit(5);
+        if (error) throw error;
+
+        const lines = ['🧾 Dernières factures'];
+        for (const f of data || []) {
+          lines.push(`${f.numero_facture} — ${detectStructure(f.structure)} — ${money(f.total_ttc)}`);
+        }
+        return bot.sendMessage(msg.chat.id, lines.join('\n'), getMainMenu());
+      }
+
+      if (text === '💳 Paiements') {
+        const { data, error } = await supabase
+          .from('paiements_mobile')
+          .select('*')
+          .order('date_paiement', { ascending: false })
+          .limit(5);
+        if (error) throw error;
+
+        const lines = ['💳 Derniers paiements'];
+        for (const p of data || []) {
+          lines.push(`${p.transaction_id} — ${detectStructure(p.structure)} — ${money(p.montant)}`);
+        }
+        return bot.sendMessage(msg.chat.id, lines.join('\n'), getMainMenu());
+      }
+
+      if (text === '📦 Emballages') {
+        const data = await buildEmballagesSummary();
+        const lines = ['📦 Gestion emballages vides'];
+        for (const row of data.summary || []) {
+          lines.push(
+            `${row.structure} — reçus: ${row.emballagesRecus}, renvoyés: ${row.emballagesRenvoyes}, solde: ${row.solde}, colis: ${row.colis}`
+          );
+        }
+        lines.push(
+          `Synthèse — reçus: ${data.synthese.emballagesRecus}, renvoyés: ${data.synthese.emballagesRenvoyes}, solde: ${data.synthese.solde}, colis: ${data.synthese.colis}`
+        );
+        return bot.sendMessage(msg.chat.id, lines.join('\n'), getMainMenu());
+      }
+
+      if (text === '🔄 Rapprochements') {
+        const rows = await buildRapprochements();
+        const lines = ['🔄 Rapprochements'];
+        const subset = rows.filter((r) => r.statut !== 'rapproché').slice(0, 5);
+
+        if (!subset.length) {
+          lines.push('Aucun paiement non rapproché trouvé.');
+        } else {
+          for (const row of subset) {
+            lines.push(
+              `${row.transaction_id} — ${money(row.montant_paiement)} — ${row.statut} — score ${row.score}`
+            );
+          }
+        }
+        return bot.sendMessage(msg.chat.id, lines.join('\n'), getMainMenu());
+      }
+
+      if (text === '🎁 Ristournes') {
+        const rows = await buildRistournes();
+        const lines = ['🎁 Ristournes'];
+
+        if (!rows.length) {
+          lines.push('Aucune ristourne trouvée.');
+        } else {
+          for (const row of rows.slice(0, 5)) {
+            lines.push(
+              `${row.reference_facture} — théorique: ${money(row.montant_theorique)} — reçu: ${money(row.montant_recu)} — ${row.statut}`
+            );
+          }
+        }
+
+        return bot.sendMessage(msg.chat.id, lines.join('\n'), getMainMenu());
+      }
+
+      if (text === '⚖️ Comparer A/B') {
+        const dashboard = await buildDashboard();
+        const dzmA = dashboard.pieData?.find((x) => x.name === 'DZM A')?.value || 0;
+        const dzmB = dashboard.pieData?.find((x) => x.name === 'DZM B')?.value || 0;
+
+        return bot.sendMessage(
+          msg.chat.id,
+          [
+            '⚖️ Comparatif DZM A vs DZM B',
+            `DZM A : ${money(dzmA)}`,
+            `DZM B : ${money(dzmB)}`,
+          ].join('\n'),
+          getMainMenu()
+        );
+      }
+
+      if (text === '🤖 Assistant IA') {
+        return bot.sendMessage(
+          msg.chat.id,
+          '🤖 Envoie maintenant ta question en langage naturel avec la commande :\n/ia Ta question ici',
+          getMainMenu()
+        );
+      }
+
+      if (text === '📤 Exports') {
+        return bot.sendMessage(
+          msg.chat.id,
+          '📤 Les exports premium sont disponibles dans l’application web DZM.',
+          getMainMenu()
+        );
+      }
+
+      if (text === 'ℹ️ Aide') {
+        return bot.sendMessage(
+          msg.chat.id,
+          'Utilise les boutons pour naviguer dans les fonctions principales DZM.',
+          getMainMenu()
+        );
+      }
+    } catch (error) {
+      console.error('Telegram button handler error:', error);
+      await bot.sendMessage(msg.chat.id, `Erreur Telegram : ${error.message}`, getMainMenu());
+    }
+  });
+
+  bot.on('polling_error', (error) => {
+    console.error('Telegram polling error:', error?.message || error);
+  });
+
+  bot.on('message', (msg) => {
+    console.log('Telegram message received from chat:', msg.chat.id);
+  });
+} else {
+  console.log('Telegram bot disabled: missing TELEGRAM_BOT_TOKEN');
 }
 
 // =========================
@@ -798,7 +947,12 @@ app.get('/api/telegram/test', async (_, res) => {
       });
     }
 
-    await bot.sendMessage(TELEGRAM_CHAT_ID, 'Test Telegram DZM : le bot fonctionne bien.');
+    await bot.sendMessage(
+      TELEGRAM_CHAT_ID,
+      'Test Telegram DZM : le bot fonctionne bien.',
+      getMainMenu()
+    );
+
     return res.json({
       success: true,
       message: 'Message Telegram envoyé',
@@ -816,10 +970,13 @@ app.post('/api/files/upload', upload.single('image'), async (req, res) => {
   const uploadedFile = getUploadedFile(req);
   try {
     if (!uploadedFile) return res.status(400).json({ error: 'Aucune image recue' });
+
     const type = req.body.type === 'paiement' ? 'paiements' : 'factures';
     const cloud = await uploadToCloudinary(uploadedFile.path, `dzm/${type}`);
     cleanFile(uploadedFile);
+
     if (!cloud) return res.status(500).json({ error: 'Cloudinary non configuré' });
+
     res.json(cloud);
   } catch (err) {
     cleanFile(uploadedFile);
@@ -985,11 +1142,13 @@ app.post('/api/emballages/manual', async (req, res) => {
       source: req.body.source || 'manuel',
       note: req.body.note || null,
     };
+
     const { data, error } = await supabase
       .from('emballages_mouvements')
       .insert(payload)
       .select('*')
       .single();
+
     if (error) throw error;
     res.json(data);
   } catch (err) {
@@ -1046,6 +1205,7 @@ app.post('/api/rapprochements', async (req, res) => {
       .maybeSingle();
 
     let data;
+
     if (existing?.id) {
       const resp = await supabase
         .from('rapprochements_factures_paiements')
@@ -1064,6 +1224,7 @@ app.post('/api/rapprochements', async (req, res) => {
       if (resp.error) throw resp.error;
       data = resp.data;
     }
+
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1102,6 +1263,7 @@ app.post('/api/ristournes/manual', async (req, res) => {
       .maybeSingle();
 
     let data;
+
     if (existing?.id) {
       const resp = await supabase
         .from('ristournes_paiements')
@@ -1120,6 +1282,7 @@ app.post('/api/ristournes/manual', async (req, res) => {
       if (resp.error) throw resp.error;
       data = resp.data;
     }
+
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1154,6 +1317,7 @@ app.post('/api/export/email', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email manquant' });
+
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
       return res.status(500).json({ error: 'Gmail non configure' });
     }
@@ -1206,9 +1370,10 @@ app.post('/api/telegram/rapport', async (_, res) => {
   }
 });
 
+// =========================
+// CRON
+// =========================
 if (bot) {
-  require('./services/telegram')(bot, supabase, null);
-
   cron.schedule(
     '0 8 * * *',
     async () => {
