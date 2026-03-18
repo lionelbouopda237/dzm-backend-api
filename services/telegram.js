@@ -1,19 +1,53 @@
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const axios = require('axios');
+const FormData = require('form-data');
+const { execFileSync } = require('child_process');
 const { assistantIA } = require('./assistant');
+const { analyseOCRFacture, analyseOCRPaiement } = require('./ocr');
+
+const sessions = new Map();
+const historyLog = [];
+const PASSWORD = 'DZM2026';
 
 function money(n) {
   return new Intl.NumberFormat('fr-FR').format(Number(n || 0)) + ' FCFA';
 }
-
+function addHistory(type, summary, details = {}) {
+  historyLog.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, type, summary, details, at: new Date().toISOString() });
+  if (historyLog.length > 60) historyLog.length = 60;
+}
+function setSession(chatId, patch) {
+  const current = sessions.get(chatId) || {};
+  sessions.set(chatId, { ...current, ...patch });
+}
+function clearSession(chatId) {
+  const current = sessions.get(chatId) || {};
+  if (current.tempFiles) current.tempFiles.forEach((f) => { try { fs.unlinkSync(f); } catch {} });
+  sessions.delete(chatId);
+}
+function detectStructure(input) {
+  const v = String(input || '').toUpperCase();
+  return v.includes('DZM B') ? 'DZM B' : 'DZM A';
+}
+function getBaseUrl() {
+  return (process.env.BACKEND_PUBLIC_URL || `http://127.0.0.1:${process.env.PORT || 3001}`).replace(/\/$/, '');
+}
 function getMainMenu() {
   return {
     reply_markup: {
       keyboard: [
-        ['📊 Statut', '🌅 Brief du matin'],
-        ['🌙 Bilan du soir', '🚨 Alertes'],
-        ['🧾 Factures', '💳 Paiements'],
-        ['📦 Emballages', '🔄 Rapprochements'],
-        ['🎁 Ristournes', '⚖️ Comparer A/B'],
-        ['🤖 Assistant IA', '📤 Exports'],
+        ['📊 Statut', '⚡ À traiter'],
+        ['🧾 Nouvelle facture', '💳 Nouveau paiement'],
+        ['📦 Retour emballages', '🎁 Paiement ristourne'],
+        ['🔄 Rapprochements', '🚨 Alertes'],
+        ['🌅 Brief du matin', '🌙 Bilan du soir'],
+        ['⚖️ Comparer A/B', '🧭 Copilote'],
+        ['🤖 Assistant IA', '📝 Décision'],
+        ['📋 Réunion', '🕘 Historique'],
+        ['📄 Document intelligent', '📤 Exports'],
+        ['🔊 Brief vocal', '🎙️ Bilan vocal'],
         ['ℹ️ Aide'],
       ],
       resize_keyboard: true,
@@ -21,38 +55,49 @@ function getMainMenu() {
     },
   };
 }
-
-function detectStructure(input) {
-  const v = String(input || '').toUpperCase();
-  if (v.includes('DZM B')) return 'DZM B';
-  return 'DZM A';
+function getInlineMenu() {
+  return {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '📊 Statut', callback_data: 'menu:status' },
+        { text: '⚡ À traiter', callback_data: 'menu:todo' },
+      ], [
+        { text: '🧾 Factures', callback_data: 'menu:factures' },
+        { text: '💳 Paiements', callback_data: 'menu:paiements' },
+      ]],
+    },
+  };
 }
-
+async function apiGet(pathname, responseType = 'json') {
+  const res = await axios.get(`${getBaseUrl()}${pathname}`, { responseType });
+  return res.data;
+}
+async function apiPost(pathname, payload) {
+  const res = await axios.post(`${getBaseUrl()}${pathname}`, payload);
+  return res.data;
+}
+async function apiPostFile(pathname, filePath, fields = {}) {
+  const form = new FormData();
+  form.append('image', fs.createReadStream(filePath));
+  Object.entries(fields).forEach(([k, v]) => form.append(k, String(v)));
+  const res = await axios.post(`${getBaseUrl()}${pathname}`, form, { headers: form.getHeaders(), maxBodyLength: Infinity });
+  return res.data;
+}
 async function quickStatus(supabase) {
   const [{ data: factures }, { data: paiements }, { data: mouvements }] = await Promise.all([
     supabase.from('factures').select('*').order('date_facture', { ascending: false }).limit(50),
     supabase.from('paiements_mobile').select('*').order('date_paiement', { ascending: false }).limit(50),
     supabase.from('emballages_mouvements').select('*').order('date_mouvement', { ascending: false }).limit(50),
   ]);
-
   const anomalies = (factures || []).filter((f) => String(f.statut || '').toLowerCase() === 'anomalie').length;
   const attente = (paiements || []).filter((p) => String(p.statut || '').toLowerCase() === 'en attente');
   const totalAttente = attente.reduce((s, p) => s + Number(p.montant || 0), 0);
-
-  const recusA = (factures || [])
-    .filter((f) => detectStructure(f.structure) === 'DZM A')
-    .reduce((s, f) => s + Number(f.nombre_casiers || 0), 0);
-  const recusB = (factures || [])
-    .filter((f) => detectStructure(f.structure) === 'DZM B')
-    .reduce((s, f) => s + Number(f.nombre_casiers || 0), 0);
-
-  const renvA = (mouvements || [])
-    .filter((m) => detectStructure(m.structure) === 'DZM A')
-    .reduce((s, m) => s + Number(m.emballages_vides || 0), 0);
-  const renvB = (mouvements || [])
-    .filter((m) => detectStructure(m.structure) === 'DZM B')
-    .reduce((s, m) => s + Number(m.emballages_vides || 0), 0);
-
+  const recusA = (factures || []).filter((f) => detectStructure(f.structure) === 'DZM A').reduce((s, f) => s + Number(f.nombre_casiers || 0), 0);
+  const recusB = (factures || []).filter((f) => detectStructure(f.structure) === 'DZM B').reduce((s, f) => s + Number(f.nombre_casiers || 0), 0);
+  const renvAInvoice = (factures || []).filter((f) => detectStructure(f.structure) === 'DZM A').reduce((s, f) => s + Number(f.casiers_retournes || 0), 0);
+  const renvBInvoice = (factures || []).filter((f) => detectStructure(f.structure) === 'DZM B').reduce((s, f) => s + Number(f.casiers_retournes || 0), 0);
+  const renvA = (mouvements || []).filter((m) => detectStructure(m.structure) === 'DZM A').reduce((s, m) => s + Number(m.emballages_vides || 0), 0) + renvAInvoice;
+  const renvB = (mouvements || []).filter((m) => detectStructure(m.structure) === 'DZM B').reduce((s, m) => s + Number(m.emballages_vides || 0), 0) + renvBInvoice;
   return [
     '📊 Statut DZM',
     `• Factures récentes : ${(factures || []).length}`,
@@ -63,324 +108,282 @@ async function quickStatus(supabase) {
     `• Solde emballages DZM B : ${recusB - renvB}`,
   ].join('\n');
 }
-
-async function sendFactures(bot, chatId, supabase) {
-  const { data } = await supabase
-    .from('factures')
-    .select('*')
-    .order('date_facture', { ascending: false })
-    .limit(5);
-
-  if (!data?.length) {
-    return bot.sendMessage(chatId, 'Aucune facture.', getMainMenu());
+async function sendVoice(bot, chatId, text, name) {
+  const base = path.join(os.tmpdir(), `${name || 'dzm'}-${Date.now()}`);
+  const wav = `${base}.wav`;
+  const ogg = `${base}.ogg`;
+  try {
+    execFileSync('espeak', ['-v', 'fr', '-s', '145', '-w', wav, text], { stdio: 'ignore' });
+    execFileSync('ffmpeg', ['-y', '-i', wav, '-acodec', 'libopus', ogg], { stdio: 'ignore' });
+    await bot.sendVoice(chatId, fs.createReadStream(ogg));
+  } finally {
+    [wav, ogg].forEach((f) => { try { fs.unlinkSync(f); } catch {} });
   }
-
-  const lines = ['🧾 Dernières factures'];
-  for (const f of data) {
-    lines.push(
-      `${f.numero_facture} — ${detectStructure(f.structure)} — ${money(f.total_ttc)}`
-    );
-  }
-
-  return bot.sendMessage(chatId, lines.join('\n'), getMainMenu());
 }
-
-async function sendPaiements(bot, chatId, supabase) {
-  const { data } = await supabase
-    .from('paiements_mobile')
-    .select('*')
-    .order('date_paiement', { ascending: false })
-    .limit(5);
-
-  if (!data?.length) {
-    return bot.sendMessage(chatId, 'Aucun paiement.', getMainMenu());
-  }
-
-  const lines = ['💳 Derniers paiements'];
-  for (const p of data) {
-    lines.push(
-      `${p.transaction_id} — ${detectStructure(p.structure)} — ${money(p.montant)}`
-    );
-  }
-
-  return bot.sendMessage(chatId, lines.join('\n'), getMainMenu());
+async function downloadTelegramFile(bot, msg) {
+  const fileId = msg.photo?.[msg.photo.length - 1]?.file_id || msg.document?.file_id;
+  if (!fileId) return null;
+  const link = await bot.getFileLink(fileId);
+  const ext = path.extname(new URL(link).pathname) || (msg.document?.mime_type?.includes('png') ? '.png' : '.jpg');
+  const out = path.join(os.tmpdir(), `tg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}${ext}`);
+  const res = await axios.get(link, { responseType: 'arraybuffer' });
+  fs.writeFileSync(out, Buffer.from(res.data));
+  return out;
 }
-
-async function sendEmballages(bot, chatId, supabase) {
-  const [{ data: factures }, { data: mouvements }, { data: lignes }] = await Promise.all([
-    supabase.from('factures').select('*'),
-    supabase.from('emballages_mouvements').select('*'),
-    supabase.from('produits_facture').select('facture_id, produit, quantite'),
+function summarizeInvoice(ocr) {
+  const colis = Number(ocr.colis || (ocr.produits || []).reduce((s, p) => s + Number(p.quantite || 0), 0));
+  const embPlein = Number(ocr.emb_plein || ocr.nombre_casiers || 0);
+  const embVide = Number(ocr.emb_vide || ocr.casiers_retournes || 0);
+  return [
+    '🧾 Facture détectée',
+    `• N° : ${ocr.numero_facture || '—'}`,
+    `• Structure : ${detectStructure(ocr.structure)}`,
+    `• Client : ${ocr.client || '—'}`,
+    `• Date : ${ocr.date_facture || '—'}`,
+    `• Total TTC : ${money(ocr.total_ttc || 0)}`,
+    `• Casiers / EMB Plein : ${embPlein}`,
+    `• EMB Vide : ${embVide}`,
+    `• Solde emballages facture : ${embPlein - embVide}`,
+    `• Colis : ${colis}`,
+    `• Confiance : ${ocr.confiance || 0}%`,
+  ].join('\n');
+}
+function summarizePayment(ocr) {
+  return [
+    '💳 Paiement détecté',
+    `• Transaction : ${ocr.transaction_id || '—'}`,
+    `• Structure : ${detectStructure(ocr.structure)}`,
+    `• Montant : ${money(ocr.montant || 0)}`,
+    `• Référence facture : ${ocr.reference_facture || '—'}`,
+    `• Bénéficiaire : ${ocr.beneficiaire || '—'}`,
+    `• Date : ${ocr.date_paiement || '—'}`,
+    `• Opérateur : ${ocr.operateur || '—'}`,
+    `• Confiance : ${ocr.confiance || 0}%`,
+  ].join('\n');
+}
+async function savePendingInvoice(bot, chatId, session) {
+  const uploaded = await apiPostFile('/api/files/upload', session.tempFiles[0], { type: 'facture' }).catch(() => null);
+  const o = session.pendingInvoice;
+  const payload = {
+    ...o,
+    structure: detectStructure(o.structure),
+    source: 'telegram',
+    produits: (o.produits || []).map((line) => ({
+      produit: String(line.produit || '').trim(),
+      quantite: Number(line.quantite || 0),
+      prix_unitaire: Number(line.prix_unitaire ?? line.prixUnitaire ?? 0),
+      total: Number(line.total || 0),
+    })),
+    image_url: uploaded?.url || null,
+    image_public_id: uploaded?.public_id || null,
+  };
+  await apiPost('/api/factures/from-ocr', payload);
+  addHistory('invoice', `Facture ${o.numero_facture || 'sans numéro'} enregistrée`, { structure: detectStructure(o.structure), total: o.total_ttc || 0 });
+  await bot.sendMessage(chatId, `✅ Facture enregistrée avec succès.\n${summarizeInvoice(o)}`, getMainMenu());
+  clearSession(chatId);
+}
+async function savePendingPayment(bot, chatId, session) {
+  const uploaded = await apiPostFile('/api/files/upload', session.tempFiles[0], { type: 'paiement' }).catch(() => null);
+  const p = session.pendingPayment;
+  const payload = { ...p, structure: detectStructure(p.structure), source: 'telegram', image_url: uploaded?.url || null, image_public_id: uploaded?.public_id || null };
+  await apiPost('/api/paiements/from-ocr', payload);
+  addHistory('payment', `Paiement ${p.transaction_id || 'sans ID'} enregistré`, { structure: detectStructure(p.structure), montant: p.montant || 0 });
+  await bot.sendMessage(chatId, `✅ Paiement enregistré avec succès.\n${summarizePayment(p)}`, getMainMenu());
+  clearSession(chatId);
+}
+async function buildToDoMessage(supabase) {
+  const status = await quickStatus(supabase);
+  const [rapprochements, ristournes] = await Promise.all([
+    apiGet('/api/rapprochements').catch(() => []),
+    apiGet('/api/ristournes').catch(() => []),
   ]);
-
-  const base = new Map();
-  ['DZM A', 'DZM B'].forEach((structure) => {
-    base.set(structure, {
-      structure,
-      emballagesRecus: 0,
-      emballagesRenvoyes: 0,
-      colis: 0,
-    });
-  });
-
-  const byFacture = new Map();
-  for (const row of lignes || []) {
-    if (!byFacture.has(row.facture_id)) byFacture.set(row.facture_id, []);
-    byFacture.get(row.facture_id).push(row);
-  }
-
-  for (const row of factures || []) {
-    const target = base.get(detectStructure(row.structure));
-    target.emballagesRecus += Number(row.nombre_casiers || 0);
-    const rows = byFacture.get(row.id) || [];
-    target.colis += rows
-      .filter((item) => String(item.produit || '').toLowerCase().includes('colis'))
-      .reduce((s, item) => s + Number(item.quantite || 0), 0);
-  }
-
-  for (const row of mouvements || []) {
-    const target = base.get(detectStructure(row.structure));
-    target.emballagesRenvoyes += Number(row.emballages_vides || 0);
-  }
-
-  const summary = Array.from(base.values()).map((item) => ({
-    ...item,
-    solde: item.emballagesRecus - item.emballagesRenvoyes,
-  }));
-
-  const lines = ['📦 Gestion emballages vides'];
-  for (const row of summary) {
-    lines.push(
-      `${row.structure} — reçus: ${row.emballagesRecus}, renvoyés: ${row.emballagesRenvoyes}, solde: ${row.solde}, colis: ${row.colis}`
-    );
-  }
-
-  return bot.sendMessage(chatId, lines.join('\n'), getMainMenu());
+  const pendingRappro = (rapprochements || []).filter((r) => r.statut !== 'rapproché').length;
+  const pendingRist = (ristournes || []).filter((r) => r.statut !== 'payée').length;
+  return `${status}\n\n⚡ À traiter\n• Rapprochements à valider : ${pendingRappro}\n• Ristournes non soldées : ${pendingRist}`;
 }
-
-async function sendCompare(bot, chatId, supabase) {
-  const { data: factures } = await supabase.from('factures').select('*');
-
-  const dzmA = (factures || [])
-    .filter((f) => detectStructure(f.structure) === 'DZM A')
-    .reduce((s, f) => s + Number(f.total_ttc || 0), 0);
-
-  const dzmB = (factures || [])
-    .filter((f) => detectStructure(f.structure) === 'DZM B')
-    .reduce((s, f) => s + Number(f.total_ttc || 0), 0);
-
-  return bot.sendMessage(
-    chatId,
-    [
-      '⚖️ Comparatif DZM A vs DZM B',
-      `DZM A : ${money(dzmA)}`,
-      `DZM B : ${money(dzmB)}`,
-    ].join('\n'),
-    getMainMenu()
-  );
+function ask(bot, chatId, text) { return bot.sendMessage(chatId, text, getMainMenu()); }
+async function handleExportCallback(bot, chatId, table) {
+  const buffer = await apiGet(`/api/export/${table}`, 'arraybuffer');
+  await bot.sendDocument(chatId, Buffer.from(buffer), {}, { filename: `DZM_${table}.xlsx`, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
-
-async function sendRapprochements(bot, chatId, supabase) {
-  const [{ data: paiements }, { data: links }] = await Promise.all([
-    supabase.from('paiements_mobile').select('*').order('date_paiement', { ascending: false }).limit(10),
-    supabase.from('rapprochements_factures_paiements').select('*'),
-  ]);
-
-  const linkedIds = new Set((links || []).map((l) => l.paiement_id));
-  const pending = (paiements || []).filter((p) => !linkedIds.has(p.id));
-
-  const lines = ['🔄 Rapprochements'];
-  if (!pending.length) {
-    lines.push('Aucun paiement non rapproché trouvé.');
-  } else {
-    for (const p of pending.slice(0, 5)) {
-      lines.push(`${p.transaction_id} — ${detectStructure(p.structure)} — ${money(p.montant)}`);
-    }
-  }
-
-  return bot.sendMessage(chatId, lines.join('\n'), getMainMenu());
-}
-
-async function sendRistournes(bot, chatId, supabase) {
-  const [{ data: factures }, { data: ristournes }] = await Promise.all([
-    supabase.from('factures').select('*'),
-    supabase.from('ristournes_paiements').select('*'),
-  ]);
-
-  const byRef = new Map((ristournes || []).map((r) => [r.reference_facture, r]));
-  const rows = (factures || []).filter((f) => Number(f.ristourne || 0) > 0).slice(0, 5);
-
-  const lines = ['🎁 Ristournes'];
-  if (!rows.length) {
-    lines.push('Aucune ristourne trouvée.');
-  } else {
-    for (const f of rows) {
-      const r = byRef.get(f.numero_facture);
-      lines.push(
-        `${f.numero_facture} — théorique: ${money(f.ristourne)} — reçu: ${money(r?.montant_recu || 0)}`
-      );
-    }
-  }
-
-  return bot.sendMessage(chatId, lines.join('\n'), getMainMenu());
-}
-
 module.exports = function setupTelegram(bot, supabase) {
   if (!bot) return;
 
-  // Commandes de secours
   bot.onText(/\/start/, async (msg) => {
-    await bot.sendMessage(
-      msg.chat.id,
-      'Bienvenue sur le bot DZM.\nChoisis une fonction dans le menu ci-dessous.',
-      getMainMenu()
-    );
+    clearSession(msg.chat.id);
+    await bot.sendMessage(msg.chat.id, 'Bienvenue sur le bot DZM V3. Choisis une fonction dans le menu ci-dessous.', getMainMenu());
   });
-
   bot.onText(/\/help/, async (msg) => {
-    await bot.sendMessage(
-      msg.chat.id,
-      'Utilise les boutons pour naviguer rapidement dans les fonctions DZM.',
-      getMainMenu()
-    );
+    await bot.sendMessage(msg.chat.id, 'Bot DZM V3\n• Utilise les boutons pour agir vite\n• Tu peux envoyer directement une photo après “Nouvelle facture” ou “Nouveau paiement”\n• Les actions importantes demandent toujours confirmation', getMainMenu());
   });
+  bot.onText(/\/status/, async (msg) => ask(bot, msg.chat.id, await quickStatus(supabase)));
+  bot.onText(/\/brief/, async (msg) => ask(bot, msg.chat.id, await assistantIA('Prépare un brief du matin clair, pédagogique et orienté action pour DZM A et DZM B.', [], supabase)));
+  bot.onText(/\/bilan/, async (msg) => ask(bot, msg.chat.id, await assistantIA('Prépare un bilan du soir clair, pédagogique et orienté action pour DZM A et DZM B.', [], supabase)));
+  bot.onText(/\/alertes/, async (msg) => ask(bot, msg.chat.id, await assistantIA('Résume les alertes critiques, anomalies, paiements à rapprocher, ristournes et emballages à surveiller.', [], supabase)));
+  bot.onText(/\/ia (.+)/, async (msg, match) => ask(bot, msg.chat.id, `Reformulation : tu veux une analyse métier.\n\n${await assistantIA((match?.[1] || '').trim(), [], supabase)}`));
 
-  bot.onText(/\/status/, async (msg) => {
-    await bot.sendMessage(msg.chat.id, await quickStatus(supabase), getMainMenu());
-  });
-
-  bot.onText(/\/brief/, async (msg) => {
-    const reponse = await assistantIA(
-      'Prépare un brief du matin synthétique pour DZM A et DZM B.',
-      [],
-      supabase
-    );
-    await bot.sendMessage(msg.chat.id, reponse, getMainMenu());
-  });
-
-  bot.onText(/\/bilan/, async (msg) => {
-    const reponse = await assistantIA(
-      'Prépare un bilan du soir synthétique pour DZM A et DZM B.',
-      [],
-      supabase
-    );
-    await bot.sendMessage(msg.chat.id, reponse, getMainMenu());
-  });
-
-  bot.onText(/\/alertes/, async (msg) => {
-    const reponse = await assistantIA(
-      'Résume les alertes, anomalies et paiements en attente.',
-      [],
-      supabase
-    );
-    await bot.sendMessage(msg.chat.id, reponse, getMainMenu());
-  });
-
-  bot.onText(/\/ia (.+)/, async (msg, match) => {
-    const question = match?.[1]?.trim();
-    if (!question) {
-      return bot.sendMessage(msg.chat.id, 'Pose une question après /ia', getMainMenu());
-    }
-    const reponse = await assistantIA(question, [], supabase);
-    await bot.sendMessage(
-      msg.chat.id,
-      `Reformulation : tu veux que j’analyse la question suivante.\n\nQuestion : ${question}\n\n${reponse}`,
-      getMainMenu()
-    );
-  });
-
-  // Boutons principaux
-  bot.on('message', async (msg) => {
-    const text = msg.text;
-    if (!text) return;
-    if (text.startsWith('/')) return;
-
+  bot.on('callback_query', async (query) => {
+    const chatId = query.message.chat.id;
+    const data = query.data || '';
     try {
-      if (text === '📊 Statut') {
-        return bot.sendMessage(msg.chat.id, await quickStatus(supabase), getMainMenu());
-      }
-
-      if (text === '🌅 Brief du matin') {
-        const reponse = await assistantIA(
-          'Prépare un brief du matin synthétique pour DZM A et DZM B.',
-          [],
-          supabase
-        );
-        return bot.sendMessage(msg.chat.id, reponse, getMainMenu());
-      }
-
-      if (text === '🌙 Bilan du soir') {
-        const reponse = await assistantIA(
-          'Prépare un bilan du soir synthétique pour DZM A et DZM B.',
-          [],
-          supabase
-        );
-        return bot.sendMessage(msg.chat.id, reponse, getMainMenu());
-      }
-
-      if (text === '🚨 Alertes') {
-        const reponse = await assistantIA(
-          'Résume les alertes, anomalies et paiements en attente.',
-          [],
-          supabase
-        );
-        return bot.sendMessage(msg.chat.id, reponse, getMainMenu());
-      }
-
-      if (text === '🧾 Factures') {
-        return sendFactures(bot, msg.chat.id, supabase);
-      }
-
-      if (text === '💳 Paiements') {
-        return sendPaiements(bot, msg.chat.id, supabase);
-      }
-
-      if (text === '📦 Emballages') {
-        return sendEmballages(bot, msg.chat.id, supabase);
-      }
-
-      if (text === '🔄 Rapprochements') {
-        return sendRapprochements(bot, msg.chat.id, supabase);
-      }
-
-      if (text === '🎁 Ristournes') {
-        return sendRistournes(bot, msg.chat.id, supabase);
-      }
-
-      if (text === '⚖️ Comparer A/B') {
-        return sendCompare(bot, msg.chat.id, supabase);
-      }
-
-      if (text === '🤖 Assistant IA') {
-        return bot.sendMessage(
-          msg.chat.id,
-          '🤖 Envoie maintenant ta question en langage naturel avec la commande :\n/ia Ta question ici',
-          getMainMenu()
-        );
-      }
-
-      if (text === '📤 Exports') {
-        return bot.sendMessage(
-          msg.chat.id,
-          '📤 Les exports premium sont disponibles dans l’application web DZM.',
-          getMainMenu()
-        );
-      }
-
-      if (text === 'ℹ️ Aide') {
-        return bot.sendMessage(
-          msg.chat.id,
-          'Utilise les boutons pour naviguer dans les fonctions principales DZM.',
-          getMainMenu()
-        );
+      if (data.startsWith('rappr:')) {
+        const [, paiement_id, facture_id, montant] = data.split(':');
+        await apiPost('/api/rapprochements', { paiement_id, facture_id, montant_impute: Number(montant || 0), source: 'telegram', score: 95 });
+        addHistory('decision', `Rapprochement validé via Telegram`, { paiement_id, facture_id });
+        await bot.answerCallbackQuery(query.id, { text: 'Rapprochement validé' });
+        await ask(bot, chatId, '✅ Rapprochement enregistré.');
+      } else if (data.startsWith('export:')) {
+        const [, table] = data.split(':');
+        await bot.answerCallbackQuery(query.id, { text: 'Export en cours…' });
+        await handleExportCallback(bot, chatId, table);
       }
     } catch (error) {
-      console.error('Telegram button handler error:', error);
-      await bot.sendMessage(
-        msg.chat.id,
-        `Erreur Telegram : ${error.message}`,
-        getMainMenu()
-      );
+      await bot.answerCallbackQuery(query.id, { text: 'Erreur', show_alert: false });
+      await ask(bot, chatId, `Erreur : ${error.message}`);
+    }
+  });
+
+  bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text?.trim();
+    const session = sessions.get(chatId) || {};
+
+    try {
+      // Media-driven flows first
+      if (msg.photo || msg.document) {
+        if (!session.mode || !['new-invoice-wait-file', 'new-payment-wait-file', 'smart-doc-wait-file'].includes(session.mode)) {
+          await ask(bot, chatId, 'J’ai bien reçu un document. Utilise d’abord “🧾 Nouvelle facture”, “💳 Nouveau paiement” ou “📄 Document intelligent”.');
+          return;
+        }
+        const filePath = await downloadTelegramFile(bot, msg);
+        setSession(chatId, { tempFiles: [filePath] });
+        if (session.mode === 'new-invoice-wait-file') {
+          const result = await analyseOCRFacture(filePath, null);
+          setSession(chatId, { mode: 'confirm-invoice', pendingInvoice: result, tempFiles: [filePath] });
+          await bot.sendMessage(chatId, `${summarizeInvoice(result)}\n\nRéponds avec :\n• ✅ Enregistrer facture\n• ❌ Annuler`, getMainMenu());
+          return;
+        }
+        if (session.mode === 'new-payment-wait-file') {
+          const result = await analyseOCRPaiement(filePath, null);
+          setSession(chatId, { mode: 'confirm-payment', pendingPayment: result, tempFiles: [filePath] });
+          await bot.sendMessage(chatId, `${summarizePayment(result)}\n\nRéponds avec :\n• ✅ Enregistrer paiement\n• ❌ Annuler`, getMainMenu());
+          return;
+        }
+        // smart document
+        const invoice = await analyseOCRFacture(filePath, null).catch(() => ({}));
+        const payment = await analyseOCRPaiement(filePath, null).catch(() => ({}));
+        const paymentScore = (payment.transaction_id ? 35 : 0) + (payment.montant ? 20 : 0);
+        const invoiceScore = (invoice.numero_facture ? 35 : 0) + ((invoice.produits || []).length ? 20 : 0) + (invoice.total_ttc ? 15 : 0);
+        if (paymentScore > invoiceScore) {
+          setSession(chatId, { mode: 'confirm-payment', pendingPayment: payment, tempFiles: [filePath] });
+          await bot.sendMessage(chatId, `📄 Document intelligent : j’interprète ce document comme un paiement.\n\n${summarizePayment(payment)}\n\nRéponds avec :\n• ✅ Enregistrer paiement\n• ❌ Annuler`, getMainMenu());
+        } else {
+          setSession(chatId, { mode: 'confirm-invoice', pendingInvoice: invoice, tempFiles: [filePath] });
+          await bot.sendMessage(chatId, `📄 Document intelligent : j’interprète ce document comme une facture.\n\n${summarizeInvoice(invoice)}\n\nRéponds avec :\n• ✅ Enregistrer facture\n• ❌ Annuler`, getMainMenu());
+        }
+        return;
+      }
+
+      if (!text) return;
+      if (text.startsWith('/')) return;
+
+      // Confirmation flows
+      if (session.mode === 'confirm-invoice') {
+        if (text === '✅ Enregistrer facture') return savePendingInvoice(bot, chatId, sessions.get(chatId));
+        if (text === '❌ Annuler') { clearSession(chatId); return ask(bot, chatId, 'Opération annulée.'); }
+      }
+      if (session.mode === 'confirm-payment') {
+        if (text === '✅ Enregistrer paiement') return savePendingPayment(bot, chatId, sessions.get(chatId));
+        if (text === '❌ Annuler') { clearSession(chatId); return ask(bot, chatId, 'Opération annulée.'); }
+      }
+
+      // Guided flows
+      if (session.mode === 'awaiting-ai-question') {
+        clearSession(chatId);
+        return ask(bot, chatId, `Reformulation : tu veux une analyse métier.\n\n${await assistantIA(text, [], supabase)}`);
+      }
+      if (session.mode === 'decision-awaiting') {
+        addHistory('decision', text, { from: 'telegram' });
+        clearSession(chatId);
+        return ask(bot, chatId, '📝 Décision enregistrée dans l’historique rapide.');
+      }
+      if (session.mode === 'emballages-step') {
+        const data = session.data || {};
+        if (session.step === 'structure') {
+          setSession(chatId, { step: 'qty', data: { ...data, structure: detectStructure(text) } });
+          return ask(bot, chatId, 'Indique maintenant la quantité d’emballages vides renvoyés.');
+        }
+        if (session.step === 'qty') {
+          setSession(chatId, { step: 'reference', data: { ...data, emballages_vides: Number(text.replace(/\D/g, '') || 0) } });
+          return ask(bot, chatId, 'Référence facture (ou tape “aucune”).');
+        }
+        if (session.step === 'reference') {
+          setSession(chatId, { step: 'date', data: { ...data, reference_facture: text.toLowerCase() === 'aucune' ? '' : text } });
+          return ask(bot, chatId, 'Date du mouvement (YYYY-MM-DD) ou tape “aujourd’hui”.');
+        }
+        if (session.step === 'date') {
+          const payload = { ...data, date_mouvement: text.toLowerCase().includes('aujourd') ? new Date().toISOString().slice(0, 10) : text, note: 'Saisi via Telegram' };
+          await apiPost('/api/emballages/manual', payload);
+          addHistory('emballages', `Retour emballages ${payload.structure}`, payload);
+          clearSession(chatId);
+          return ask(bot, chatId, '✅ Retour d’emballages enregistré.');
+        }
+      }
+      if (session.mode === 'ristourne-step') {
+        const data = session.data || {};
+        if (session.step === 'structure') { setSession(chatId, { step: 'reference', data: { ...data, structure: detectStructure(text) } }); return ask(bot, chatId, 'Référence facture ?'); }
+        if (session.step === 'reference') { setSession(chatId, { step: 'amount', data: { ...data, reference_facture: text } }); return ask(bot, chatId, 'Montant reçu ?'); }
+        if (session.step === 'amount') { setSession(chatId, { step: 'date', data: { ...data, montant_recu: Number(text.replace(/\D/g, '') || 0) } }); return ask(bot, chatId, 'Date de paiement (YYYY-MM-DD) ou tape “aujourd’hui”.'); }
+        if (session.step === 'date') { setSession(chatId, { step: 'mode', data: { ...data, date_paiement: text.toLowerCase().includes('aujourd') ? new Date().toISOString().slice(0, 10) : text } }); return ask(bot, chatId, 'Mode de paiement ?'); }
+        if (session.step === 'mode') {
+          const payload = { ...data, mode_paiement: text, commentaire: 'Saisi via Telegram', password: PASSWORD };
+          await apiPost('/api/ristournes/manual', payload);
+          addHistory('ristourne', `Paiement ristourne ${payload.reference_facture}`, payload);
+          clearSession(chatId);
+          return ask(bot, chatId, '✅ Paiement de ristourne enregistré.');
+        }
+      }
+
+      // Buttons / menus
+      if (text === '📊 Statut') return ask(bot, chatId, await quickStatus(supabase));
+      if (text === '⚡ À traiter') return ask(bot, chatId, await buildToDoMessage(supabase));
+      if (text === '🧾 Nouvelle facture') { setSession(chatId, { mode: 'new-invoice-wait-file' }); return ask(bot, chatId, 'Envoie maintenant la photo ou le document de la facture.'); }
+      if (text === '💳 Nouveau paiement') { setSession(chatId, { mode: 'new-payment-wait-file' }); return ask(bot, chatId, 'Envoie maintenant la capture ou le document du paiement.'); }
+      if (text === '📄 Document intelligent') { setSession(chatId, { mode: 'smart-doc-wait-file' }); return ask(bot, chatId, 'Envoie maintenant le document. Je vais déterminer s’il s’agit d’une facture ou d’un paiement.'); }
+      if (text === '📦 Retour emballages') { setSession(chatId, { mode: 'emballages-step', step: 'structure', data: {} }); return ask(bot, chatId, 'Pour quelle structure ? Réponds par DZM A ou DZM B.'); }
+      if (text === '🎁 Paiement ristourne') { setSession(chatId, { mode: 'ristourne-step', step: 'structure', data: {} }); return ask(bot, chatId, 'Pour quelle structure ? Réponds par DZM A ou DZM B.'); }
+      if (text === '🔄 Rapprochements') {
+        const rows = await apiGet('/api/rapprochements').catch(() => []);
+        const subset = (rows || []).filter((r) => r.statut !== 'rapproché').slice(0, 5);
+        if (!subset.length) return ask(bot, chatId, 'Aucun paiement non rapproché trouvé.');
+        for (const row of subset) {
+          await bot.sendMessage(chatId, `${row.transaction_id} — ${money(row.montant_paiement)} — ${row.numero_facture || 'aucune proposition'} — score ${row.score}%`, {
+            reply_markup: { inline_keyboard: row.facture_id ? [[{ text: '✅ Valider le rapprochement', callback_data: `rappr:${row.paiement_id}:${row.facture_id}:${row.montant_paiement}` }]] : [] },
+          });
+        }
+        return bot.sendMessage(chatId, 'Sélectionne les rapprochements à valider.', getMainMenu());
+      }
+      if (text === '🚨 Alertes') return ask(bot, chatId, await assistantIA('Résume les alertes critiques, anomalies, paiements à rapprocher et ristournes à surveiller.', [], supabase));
+      if (text === '🌅 Brief du matin') return ask(bot, chatId, await assistantIA('Prépare un brief du matin clair, pédagogique et orienté action pour DZM A et DZM B.', [], supabase));
+      if (text === '🌙 Bilan du soir') return ask(bot, chatId, await assistantIA('Prépare un bilan du soir clair, pédagogique et orienté action pour DZM A et DZM B.', [], supabase));
+      if (text === '⚖️ Comparer A/B') return ask(bot, chatId, await assistantIA('Compare DZM A et DZM B sur les achats, paiements, emballages, ristournes et anomalies. Réponse structurée et concise.', [], supabase));
+      if (text === '🧭 Copilote') return ask(bot, chatId, await assistantIA('Agis comme un copilote opérationnel DZM. Donne les priorités du moment, les anomalies, les rapprochements à valider et la prochaine meilleure action.', [], supabase));
+      if (text === '🤖 Assistant IA') { setSession(chatId, { mode: 'awaiting-ai-question' }); return ask(bot, chatId, 'Pose maintenant ta question en langage naturel.'); }
+      if (text === '📝 Décision') { setSession(chatId, { mode: 'decision-awaiting' }); return ask(bot, chatId, 'Décris maintenant la décision à enregistrer (ex: doublon écrasé, facture validée malgré OCR faible, etc.).'); }
+      if (text === '📋 Réunion') return ask(bot, chatId, await assistantIA('Prépare un résumé de réunion très lisible sur DZM A / DZM B : achats, paiements, emballages, ristournes, anomalies, actions prioritaires.', [], supabase));
+      if (text === '🕘 Historique') {
+        if (!historyLog.length) return ask(bot, chatId, 'Historique rapide vide pour le moment.');
+        return ask(bot, chatId, ['🕘 Historique rapide', ...historyLog.slice(0, 10).map((h) => `• ${new Date(h.at).toLocaleString('fr-FR')} — ${h.summary}`)].join('\n'));
+      }
+      if (text === '📤 Exports') {
+        return bot.sendMessage(chatId, 'Choisis un export à recevoir dans Telegram.', { reply_markup: { inline_keyboard: [[{ text: '🧾 Factures', callback_data: 'export:factures' }, { text: '💳 Paiements', callback_data: 'export:paiements_mobile' }], [{ text: '📦 Produits', callback_data: 'export:produits_facture' }]] } });
+      }
+      if (text === '🔊 Brief vocal') { const report = await assistantIA('Prépare un brief du matin court et oral pour DZM A et DZM B.', [], supabase); await sendVoice(bot, chatId, report, 'brief'); return ask(bot, chatId, '🔊 Brief vocal envoyé.'); }
+      if (text === '🎙️ Bilan vocal') { const report = await assistantIA('Prépare un bilan du soir court et oral pour DZM A et DZM B.', [], supabase); await sendVoice(bot, chatId, report, 'bilan'); return ask(bot, chatId, '🎙️ Bilan vocal envoyé.'); }
+      if (text === 'ℹ️ Aide') return ask(bot, chatId, 'Tu peux consulter, enregistrer des pièces, valider des rapprochements, enregistrer des ristournes, piloter l’activité et demander des synthèses IA.');
+    } catch (error) {
+      console.error('Telegram error:', error);
+      await ask(bot, chatId, `Erreur Telegram : ${error.message}`);
     }
   });
 };

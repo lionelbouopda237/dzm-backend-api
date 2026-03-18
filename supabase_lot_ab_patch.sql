@@ -1,0 +1,5 @@
+-- LOT A + LOT B
+-- Cette version n'introduit pas de changement de schéma obligatoire.
+-- Le patch s'appuie sur les tables existantes : factures, produits_facture, paiements_mobile,
+-- emballages_mouvements, rapprochements_factures_paiements, ristournes_paiements.
+-- Si besoin plus tard, on pourra ajouter des tables d'audit et de sessions Telegram persistantes.

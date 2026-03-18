@@ -28,6 +28,9 @@ Réponds UNIQUEMENT avec un JSON valide sans texte avant ou après.
   "total_ttc": 0,
   "nombre_casiers": 0,
   "casiers_retournes": 0,
+  "emb_plein": 0,
+  "emb_vide": 0,
+  "colis": 0,
   "confiance": 95
 }`
           },
@@ -106,7 +109,7 @@ async function fallbackTesseract(imagePath, type) {
     const montantMatch = text.match(/(?:net|total)[^\d]*(\d[\d\s]{3,})/i);
     const clientMatch = text.match(/(?:client)[^\n]*:?\s*([^\n]{3,40})/i);
     const casiersMatch = text.match(/(?:casiers?)[^\d]*(\d+)/i);
-    return { numero_facture: numeroMatch?.[1] || null, client: clientMatch?.[1]?.trim() || null, date_facture: new Date().toISOString().split("T")[0], structure: "DZM A", produits: [], total_ht: null, tva: null, ristourne: null, total_ttc: montantMatch ? parseInt(montantMatch[1].replace(/\s/g,"")) : null, nombre_casiers: casiersMatch ? parseInt(casiersMatch[1]) : null, casiers_retournes: null, confiance: 35, source: "tesseract" };
+    return { numero_facture: numeroMatch?.[1] || null, client: clientMatch?.[1]?.trim() || null, date_facture: new Date().toISOString().split("T")[0], structure: "DZM A", produits: [], total_ht: null, tva: null, ristourne: null, total_ttc: montantMatch ? parseInt(montantMatch[1].replace(/\s/g,"")) : null, nombre_casiers: casiersMatch ? parseInt(casiersMatch[1]) : null, casiers_retournes: 0, emb_plein: casiersMatch ? parseInt(casiersMatch[1]) : 0, emb_vide: 0, colis: casiersMatch ? parseInt(casiersMatch[1]) : 0, confiance: 35, source: "tesseract" };
   } catch(e) {
     return { erreur: "OCR indisponible", confiance: 0, message: "Saisie manuelle requise" };
   }
